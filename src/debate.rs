@@ -86,12 +86,23 @@ pub async fn run_debate(
         ));
     }
 
+    // Chairman candidates: the designated chairman first, then any model that
+    // answered successfully this debate, so a down chairman fails over to a live
+    // peer instead of collapsing synthesis to a raw first answer.
+    let live: Vec<&str> = latest.iter().map(|(n, _)| n.as_str()).collect();
+    let mut chairmen: Vec<&dyn Provider> = vec![chairman];
+    for p in providers {
+        if p.name() != chairman.name() && live.contains(&p.name()) {
+            chairmen.push(p.as_ref());
+        }
+    }
+
     let (final_answer, report) = match cfg.debate.protocol {
         Protocol::Synthesis => {
-            chairman_decide(chairman, cfg, synthesis_prompt(question, &labeled), &latest, &mut warnings).await
+            chairman_decide(&chairmen, cfg, synthesis_prompt(question, &labeled), &latest, &mut warnings).await
         }
         Protocol::Judge => {
-            chairman_decide(chairman, cfg, judge_prompt(question, &labeled), &latest, &mut warnings).await
+            chairman_decide(&chairmen, cfg, judge_prompt(question, &labeled), &latest, &mut warnings).await
         }
         Protocol::Majority => majority_decide(&latest),
     };
@@ -226,10 +237,13 @@ fn chairman_max_tokens(defaults: &Defaults) -> u32 {
     defaults.max_tokens.max(CHAIRMAN_MIN_TOKENS)
 }
 
-/// Synthesis/judge: hand the labeled answers to the chairman model, parse its
-/// JSON into (final_answer, report). Falls back to the first answer on failure.
+/// Synthesis/judge: hand the labeled answers to the first chairman candidate
+/// that answers, parse its JSON into (final_answer, report). A down chairman
+/// fails over to a live peer (any model that already answered can synthesize);
+/// only if every candidate fails do we degrade to the first answer with no
+/// report — and always with a warning, so the degradation is never silent.
 async fn chairman_decide(
-    chairman: &dyn Provider,
+    chairmen: &[&dyn Provider],
     cfg: &Config,
     user: String,
     latest: &[(String, String)],
@@ -241,22 +255,34 @@ async fn chairman_decide(
         temperature: cfg.defaults.temperature,
         max_tokens: chairman_max_tokens(&cfg.defaults),
     };
-    match chairman.complete(&prompt).await {
-        Ok(a) => {
-            let (fa, rep, w) = parse_synthesis(&a.text);
-            if let Some(w) = w {
-                warnings.push(w);
+    let mut skipped: Vec<String> = Vec::new();
+    for (i, ch) in chairmen.iter().enumerate() {
+        match ch.complete(&prompt).await {
+            Ok(a) => {
+                if i > 0 {
+                    warnings.push(format!(
+                        "chairman fell back to `{}` — skipped: {}",
+                        ch.name(),
+                        skipped.join("; ")
+                    ));
+                }
+                let (fa, rep, w) = parse_synthesis(&a.text);
+                if let Some(w) = w {
+                    warnings.push(w);
+                }
+                return (fa, rep);
             }
-            (fa, rep)
-        }
-        Err(e) => {
-            warnings.push(format!("chairman failed: {e}"));
-            (
-                latest.first().map(|(_, t)| t.clone()).unwrap_or_default(),
-                Report::default(),
-            )
+            Err(e) => skipped.push(format!("`{}`: {e}", ch.name())),
         }
     }
+    warnings.push(format!(
+        "all chairman candidates failed ({}); returning the first answer without synthesis",
+        skipped.join("; ")
+    ));
+    (
+        latest.first().map(|(_, t)| t.clone()).unwrap_or_default(),
+        Report::default(),
+    )
 }
 
 /// Majority: deterministic clustering by normalized text (no extra LLM call).
@@ -455,6 +481,26 @@ mod tests {
         assert!(!res.models_used.contains(&"c".to_string()));
         let r0 = &res.rounds[0];
         assert!(r0.answers.iter().any(|a| a.model == "c" && a.error.is_some()));
+    }
+
+    #[tokio::test]
+    async fn chairman_fails_over_to_live_peer() {
+        let c = cfg(0); // synthesis protocol, min_models defaults to 2
+        let down_chairman = crate::provider::FailProvider::new("a");
+        // `b` answers round 0, then can synthesize when promoted to chairman.
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::new(
+                "b",
+                ["b-ans", r#"{"final_answer":"SYNTH-BY-B","agreements":[],"disagreements":[]}"#],
+            )),
+            Box::new(MockProvider::new("c", ["c-ans"])),
+        ];
+        let res = run_debate(&c, &providers, &down_chairman, "Q").await.unwrap();
+        assert_eq!(res.final_answer, "SYNTH-BY-B", "a down chairman must fail over to a live peer");
+        assert!(
+            res.warnings.iter().any(|w| w.contains("fell back")),
+            "the chairman fallback must surface as a warning"
+        );
     }
 
     #[test]
