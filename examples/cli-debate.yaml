@@ -1,0 +1,14 @@
+# Live debate using local CLIs (no API keys needed).
+# Run: llm-debator debate --config examples/cli-debate.yaml "your question"
+defaults:
+  timeout_secs: 200
+
+models:
+  - { name: codex, kind: cli, cli: codex, fast: true }
+  - { name: claude, kind: cli, cli: claude, fast: true }
+
+debate:
+  rounds: 0          # broadcast + synthesis only (fast smoke); bump for real debates
+  protocol: synthesis
+  chairman: codex
+  anonymize: true
