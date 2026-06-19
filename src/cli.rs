@@ -1,12 +1,10 @@
 //! Command-line interface (clap) and output rendering.
 
-use crate::config::{CliKind, Config, ModelKind, Protocol};
-use crate::debate::{run_debate, DebateResult};
-use crate::provider::{build_provider, Provider};
-use crate::validate::run_validate;
+use crate::config::{parse_protocol, CliKind, Config, ModelKind};
+use crate::debate::{debate_from_config, DebateResult};
+use crate::validate::validate_from_config;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
-use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -29,6 +27,8 @@ pub enum Command {
     Models(ModelsArgs),
     /// Run as an MCP server over stdio, exposing `debate` and `validate` tools.
     Mcp(McpArgs),
+    /// Serve the web UI + JSON API (POST /api/debate, /api/validate).
+    Serve(ServeArgs),
 }
 
 #[derive(Args)]
@@ -50,19 +50,13 @@ pub struct DebateArgs {
 }
 
 pub async fn run_debate_cmd(args: DebateArgs) -> anyhow::Result<()> {
-    let mut cfg = load_config(args.config.as_deref())?;
+    let mut cfg = Config::load_default(args.config.as_deref())?;
     if let Some(r) = args.rounds {
         cfg.debate.rounds = r;
     }
     if let Some(p) = &args.protocol {
         cfg.debate.protocol = parse_protocol(p)?;
     }
-
-    let providers: Vec<Box<dyn Provider>> = cfg
-        .models
-        .iter()
-        .map(|m| build_provider(m, &cfg.defaults))
-        .collect::<anyhow::Result<_>>()?;
 
     eprintln!(
         "[llm-debator] {} models \u{b7} {} round(s) \u{b7} {} \u{b7} ~{} model calls",
@@ -72,17 +66,7 @@ pub async fn run_debate_cmd(args: DebateArgs) -> anyhow::Result<()> {
         crate::debate::estimate_calls(cfg.models.len(), cfg.debate.rounds, cfg.debate.protocol),
     );
 
-    let chair_name = cfg
-        .resolved_chairman()
-        .context("no chairman and no models to fall back to")?
-        .to_string();
-    let chairman: &dyn Provider = providers
-        .iter()
-        .find(|p| p.name() == chair_name)
-        .map(|b| b.as_ref())
-        .with_context(|| format!("chairman `{chair_name}` not found among providers"))?;
-
-    let result = run_debate(&cfg, &providers, chairman, &args.prompt).await?;
+    let result = debate_from_config(&cfg, &args.prompt).await?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -114,23 +98,15 @@ pub struct ValidateArgs {
 }
 
 pub async fn run_validate_cmd(args: ValidateArgs) -> anyhow::Result<()> {
-    let cfg = load_config(args.config.as_deref())?;
-
-    let reviewer_name = args
-        .reviewer
-        .clone()
-        .or_else(|| cfg.validate.reviewers.first().cloned())
-        .or_else(|| cfg.models.first().map(|m| m.name.clone()))
-        .context("no reviewer configured and no models defined")?;
-    let rcfg = cfg
-        .models
-        .iter()
-        .find(|m| m.name == reviewer_name)
-        .with_context(|| format!("reviewer `{reviewer_name}` is not a defined model"))?;
-    let reviewer = build_provider(rcfg, &cfg.defaults)?;
-
+    let cfg = Config::load_default(args.config.as_deref())?;
     let context = gather_context(args.files.as_deref(), args.allow_secrets)?;
-    let res = run_validate(reviewer.as_ref(), &args.statement, context.as_deref()).await?;
+    let res = validate_from_config(
+        &cfg,
+        &args.statement,
+        args.reviewer.as_deref(),
+        context.as_deref(),
+    )
+    .await?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&res)?);
@@ -179,8 +155,18 @@ pub struct McpArgs {
     pub config: Option<String>,
 }
 
+#[derive(Args)]
+pub struct ServeArgs {
+    /// Config path (default: ./llm-debator.yaml then ~/.config/llm-debator/config.yaml).
+    #[arg(short, long)]
+    pub config: Option<String>,
+    /// Port to listen on (localhost).
+    #[arg(short, long, default_value_t = 8080)]
+    pub port: u16,
+}
+
 pub async fn run_models_cmd(args: ModelsArgs) -> anyhow::Result<()> {
-    let cfg = load_config(args.config.as_deref())?;
+    let cfg = Config::load_default(args.config.as_deref())?;
     println!("{} model(s):", cfg.models.len());
     for m in &cfg.models {
         let status = match m.kind {
@@ -229,41 +215,6 @@ fn which(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn parse_protocol(s: &str) -> anyhow::Result<Protocol> {
-    match s.to_lowercase().as_str() {
-        "synthesis" => Ok(Protocol::Synthesis),
-        "majority" => Ok(Protocol::Majority),
-        "judge" => Ok(Protocol::Judge),
-        other => anyhow::bail!("unknown protocol `{other}` (expected synthesis|majority|judge)"),
-    }
-}
-
-fn load_config(explicit: Option<&str>) -> anyhow::Result<Config> {
-    let candidates: Vec<PathBuf> = match explicit {
-        Some(p) => vec![PathBuf::from(p)],
-        None => {
-            let mut v = vec![PathBuf::from("llm-debator.yaml")];
-            if let Some(home) = std::env::var_os("HOME") {
-                v.push(PathBuf::from(home).join(".config/llm-debator/config.yaml"));
-            }
-            v
-        }
-    };
-    for c in &candidates {
-        if c.exists() {
-            return Config::load(c);
-        }
-    }
-    anyhow::bail!(
-        "no config found (looked for: {})",
-        candidates
-            .iter()
-            .map(|p| p.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-
 fn print_pretty(r: &DebateResult) {
     println!(
         "\n=== FINAL ANSWER ({} · {}) ===\n",
@@ -293,14 +244,6 @@ fn print_pretty(r: &DebateResult) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_protocol_variants() {
-        assert!(matches!(parse_protocol("synthesis").unwrap(), Protocol::Synthesis));
-        assert!(matches!(parse_protocol("Majority").unwrap(), Protocol::Majority));
-        assert!(matches!(parse_protocol("judge").unwrap(), Protocol::Judge));
-        assert!(parse_protocol("nope").is_err());
-    }
 
     #[test]
     fn which_finds_real_binaries_only() {

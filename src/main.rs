@@ -5,6 +5,7 @@ mod mcp;
 mod provider;
 mod report;
 mod safety;
+mod server;
 mod validate;
 
 use clap::Parser;
@@ -17,5 +18,6 @@ async fn main() -> anyhow::Result<()> {
         cli::Command::Validate(args) => cli::run_validate_cmd(args).await,
         cli::Command::Models(args) => cli::run_models_cmd(args).await,
         cli::Command::Mcp(args) => mcp::serve(args.config).await,
+        cli::Command::Serve(args) => server::serve(args.config, args.port).await,
     }
 }

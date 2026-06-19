@@ -2,7 +2,9 @@
 //! reviewer model and return its independent take. A lightweight cousin of the
 //! full debate — ported from the `second-opinion` skill's prompt template.
 
-use crate::provider::{Prompt, Provider};
+use crate::config::Config;
+use crate::provider::{build_provider, Prompt, Provider};
+use anyhow::Context;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,6 +30,29 @@ pub async fn run_validate(
         reviewer: reviewer.name().to_string(),
         take: ans.text,
     })
+}
+
+/// Resolve a reviewer from config (explicit name → validate.reviewers[0] →
+/// first model), build it, and run a single-shot validation. Shared by CLI,
+/// MCP, and HTTP surfaces.
+pub async fn validate_from_config(
+    cfg: &Config,
+    statement: &str,
+    reviewer: Option<&str>,
+    context: Option<&str>,
+) -> anyhow::Result<ValidateResult> {
+    let name = reviewer
+        .map(|s| s.to_string())
+        .or_else(|| cfg.validate.reviewers.first().cloned())
+        .or_else(|| cfg.models.first().map(|m| m.name.clone()))
+        .context("no reviewer configured and no models defined")?;
+    let rcfg = cfg
+        .models
+        .iter()
+        .find(|m| m.name == name)
+        .with_context(|| format!("reviewer `{name}` is not a defined model"))?;
+    let provider = build_provider(rcfg, &cfg.defaults)?;
+    run_validate(provider.as_ref(), statement, context).await
 }
 
 fn validate_prompt(statement: &str, context: Option<&str>) -> String {

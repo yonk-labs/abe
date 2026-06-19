@@ -1,8 +1,9 @@
 //! Debate engine: broadcast, critique rounds, decision protocols.
 
 use crate::config::{Config, Protocol};
-use crate::provider::{Prompt, Provider};
+use crate::provider::{build_provider, Prompt, Provider};
 use crate::report::{judge_prompt, parse_synthesis, synthesis_prompt, Report};
+use anyhow::Context;
 use futures::future::join_all;
 use serde::Serialize;
 
@@ -103,6 +104,24 @@ pub async fn run_debate(
         rounds,
         warnings,
     })
+}
+
+/// Build providers from config, resolve the chairman, and run a full debate.
+/// Shared by the CLI, MCP, and HTTP surfaces. Apply any rounds/protocol
+/// overrides to `cfg` before calling.
+pub async fn debate_from_config(cfg: &Config, question: &str) -> anyhow::Result<DebateResult> {
+    let providers: Vec<Box<dyn Provider>> = cfg
+        .models
+        .iter()
+        .map(|m| build_provider(m, &cfg.defaults))
+        .collect::<anyhow::Result<_>>()?;
+    let chair = cfg.resolved_chairman().map(|s| s.to_string());
+    let chairman: &dyn Provider = providers
+        .iter()
+        .find(|p| Some(p.name()) == chair.as_deref())
+        .map(|b| b.as_ref())
+        .context("chairman model not found among providers")?;
+    run_debate(cfg, &providers, chairman, question).await
 }
 
 fn base_prompt(cfg: &Config, question: &str) -> Prompt {

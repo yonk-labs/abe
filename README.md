@@ -24,7 +24,12 @@ llm-debator models --config examples/cli-debate.yaml
 
 # Run as an MCP server over stdio (exposes `debate` and `validate` tools)
 llm-debator mcp --config examples/cli-debate.yaml
+
+# Serve the web UI + JSON API at http://127.0.0.1:8080  (--port to change)
+llm-debator serve --config examples/cli-debate.yaml
 ```
+
+The web UI is a single page with a debate/validate toggle. The JSON API: `POST /api/debate {prompt, rounds?, protocol?}` and `POST /api/validate {statement, reviewer?, context?}`.
 
 Add `--json` to `debate`/`validate` for machine-readable output. `debate` flags: `--rounds N`, `--protocol synthesis|majority|judge`.
 
@@ -77,4 +82,4 @@ The report is a *synthesized interpretation* — raw per-model answers are alway
 
 ## Status
 
-CLI-first v0.x. Web app and an HTTP reverse-proxy surface are intentionally deferred. See `docs/specs/` and `docs/superpowers/plans/` for the design + plan.
+v0.x. Surfaces: CLI (`debate` / `validate` / `models`), MCP server (`mcp`), and web UI + JSON API (`serve`). See `docs/specs/` and `docs/superpowers/plans/` for the design + plan.

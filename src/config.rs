@@ -183,6 +183,44 @@ impl Config {
             .as_deref()
             .or_else(|| self.models.first().map(|m| m.name.as_str()))
     }
+
+    /// Load from an explicit path, or the default search path
+    /// (./llm-debator.yaml then ~/.config/llm-debator/config.yaml).
+    pub fn load_default(explicit: Option<&str>) -> anyhow::Result<Config> {
+        let candidates: Vec<std::path::PathBuf> = match explicit {
+            Some(p) => vec![std::path::PathBuf::from(p)],
+            None => {
+                let mut v = vec![std::path::PathBuf::from("llm-debator.yaml")];
+                if let Some(home) = std::env::var_os("HOME") {
+                    v.push(std::path::PathBuf::from(home).join(".config/llm-debator/config.yaml"));
+                }
+                v
+            }
+        };
+        for c in &candidates {
+            if c.exists() {
+                return Config::load(c);
+            }
+        }
+        anyhow::bail!(
+            "no config found (looked for: {})",
+            candidates
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+/// Parse a protocol name (case-insensitive). Shared by CLI, MCP, and HTTP.
+pub fn parse_protocol(s: &str) -> anyhow::Result<Protocol> {
+    match s.to_lowercase().as_str() {
+        "synthesis" => Ok(Protocol::Synthesis),
+        "majority" => Ok(Protocol::Majority),
+        "judge" => Ok(Protocol::Judge),
+        other => anyhow::bail!("unknown protocol `{other}` (expected synthesis|majority|judge)"),
+    }
 }
 
 #[cfg(test)]
@@ -253,5 +291,13 @@ validate: { reviewers: [codex-cli] }
     fn http_kind_requires_model() {
         let c = Config::from_yaml("models: [{name: a, kind: openai}]").unwrap();
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn parse_protocol_names() {
+        assert!(matches!(parse_protocol("synthesis").unwrap(), Protocol::Synthesis));
+        assert!(matches!(parse_protocol("MAJORITY").unwrap(), Protocol::Majority));
+        assert!(matches!(parse_protocol("judge").unwrap(), Protocol::Judge));
+        assert!(parse_protocol("bogus").is_err());
     }
 }
