@@ -5,7 +5,7 @@ edition = "2021"
 description = "Multi-provider LLM debate/consensus proxy (HTTP + CLI providers)"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1"

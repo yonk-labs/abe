@@ -3,6 +3,8 @@
 
 use async_trait::async_trait;
 
+pub mod cli;
+
 /// A single request to a model.
 #[derive(Debug, Clone)]
 pub struct Prompt {
