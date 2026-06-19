@@ -1,0 +1,15 @@
+{
+  "name": "abe",
+  "displayName": "Abe",
+  "version": "0.1.0",
+  "description": "Multi-model LLM debate & second-opinion validation, named for Lincoln. Exposes debate/validate as MCP tools plus /abe:debate and /abe:validate.",
+  "author": {
+    "name": "yonk-labs",
+    "email": "matt@theyonk.com"
+  },
+  "homepage": "https://github.com/yonk-labs/abe",
+  "repository": "https://github.com/yonk-labs/abe",
+  "license": "MIT",
+  "keywords": ["debate", "llm", "consensus", "mcp"],
+  "mcpServers": "./.mcp.json"
+}

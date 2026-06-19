@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "abe": {
+      "command": "abe",
+      "args": ["mcp"]
+    }
+  }
+}

@@ -1,0 +1,11 @@
+target
+.git
+.github
+skill-output
+.remember
+docs
+examples
+*.md
+.claude-plugin
+commands
+.mcp.json

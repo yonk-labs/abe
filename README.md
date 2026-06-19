@@ -1,39 +1,84 @@
-# llm-debator
+# Abe
 
-A small Rust binary that broadcasts a prompt to several LLMs, has them debate over N rounds, and returns a synthesized final answer plus an **agreement / disagreement** report. Models can be HTTP providers (OpenAI, Anthropic, OpenAI-compatible, local) **or** local CLIs (`codex`, `claude`, `opencode`) — mixed freely in one debate.
+> Multi-model LLM **debate** & **second-opinion** validation — named for Lincoln, one of history's great debaters.
 
-No API keys? Use the CLI providers — a debate between `codex` and `claude` runs with zero cloud config.
+Abe broadcasts a prompt to several LLMs, has them debate over N rounds, and returns a synthesized final answer plus an **agreement / disagreement** report. Models can be HTTP providers (OpenAI, Anthropic, OpenAI-compatible, local) **or** local CLIs (`codex`, `claude`, `opencode`) — mixed freely in one debate.
 
-## Build
+No API keys? Use the CLI providers — a debate between `codex` and `claude` runs with zero cloud config. Have a model on your network (vLLM / Ollama / LM Studio)? Point Abe at its `base_url` with no key at all.
+
+Three surfaces: a **CLI**, an **MCP server** (for Claude Code and other MCP clients), and a small **web UI + JSON API**.
+
+## Install
+
+### Option 1 — prebuilt binary (no toolchain)
 
 ```bash
-cargo build --release   # binary at target/release/llm-debator
+curl -fsSL https://raw.githubusercontent.com/yonk-labs/abe/main/install.sh | sh
+```
+
+Downloads the right binary for your platform (Linux x86_64, macOS arm64/x86_64) to `~/.local/bin`, and writes a starter config to `~/.config/abe/config.yaml`.
+
+### Option 2 — cargo (any platform with Rust)
+
+```bash
+cargo install --git https://github.com/yonk-labs/abe
+```
+
+### Option 3 — Docker (web UI / API)
+
+```bash
+docker run -p 8080:8080 -v "$PWD/abe.yaml:/config.yaml" ghcr.io/yonk-labs/abe
+# browser -> http://localhost:8080
+```
+
+The image runs the web UI bound to `0.0.0.0` inside the container. Two caveats:
+
+- **CLI providers** (`codex`/`claude`/`opencode`) are **not** in the image — use HTTP providers for Dockerized debates.
+- **Models on your LAN** (e.g. `192.168.1.x`) may be unreachable from a default-bridge container. Docker is the easy path for **cloud** providers (OpenAI/Anthropic). For models on your own network, the native binary (Option 1) runs on your host network and just works — or try `docker run --network host`.
+
+### As a Claude Code plugin
+
+Install the binary first (Option 1 or 2 — it must be on your `PATH`), then:
+
+```
+/plugin marketplace add yonk-labs/abe
+/plugin install abe@yonk-labs
+```
+
+You get the `abe` MCP tools (`debate`, `validate`) that Claude can call directly, plus two slash commands:
+
+```
+/abe:debate Is Postgres a good default database?
+/abe:validate We should rewrite this service in Rust.
 ```
 
 ## Quick start
 
 ```bash
-# Debate (uses ./llm-debator.yaml or ~/.config/llm-debator/config.yaml by default)
-llm-debator debate --config examples/cli-debate.yaml "Is Postgres a good default database?"
+# Debate (reads ./abe.yaml, then ~/.config/abe/config.yaml by default)
+abe debate "Is Postgres a good default database?"
 
 # Second opinion (single model)
-llm-debator validate --reviewer codex "We should rewrite this service in Rust."
+abe validate --reviewer codex "We should rewrite this service in Rust."
 
 # Inspect configured models + reachability
-llm-debator models --config examples/cli-debate.yaml
+abe models
 
-# Run as an MCP server over stdio (exposes `debate` and `validate` tools)
-llm-debator mcp --config examples/cli-debate.yaml
+# Run as an MCP server over stdio (exposes `debate` and `validate`)
+abe mcp
 
-# Serve the web UI + JSON API at http://127.0.0.1:8080  (--port to change)
-llm-debator serve --config examples/cli-debate.yaml
+# Serve the web UI + JSON API at http://127.0.0.1:8080
+abe serve                      # local only
+abe serve --host 0.0.0.0       # expose on your LAN (UI is UNAUTHENTICATED — trusted networks only)
 ```
-
-The web UI is a single page with a debate/validate toggle. The JSON API: `POST /api/debate {prompt, rounds?, protocol?}` and `POST /api/validate {statement, reviewer?, context?}`.
 
 Add `--json` to `debate`/`validate` for machine-readable output. `debate` flags: `--rounds N`, `--protocol synthesis|majority|judge`.
 
+JSON API: `POST /api/debate {prompt, rounds?, protocol?}` and `POST /api/validate {statement, reviewer?, context?}`.
+
 ## Config (YAML)
+
+Copy [`config.example.yaml`](config.example.yaml) to `./abe.yaml` or `~/.config/abe/config.yaml`.
 
 ```yaml
 defaults:
@@ -44,11 +89,11 @@ defaults:
   max_context_kb: 50    # warn when assembled context exceeds this
 
 models:
-  - { name: gpt,        kind: openai,            model: gpt-5.1,         api_key_env: OPENAI_API_KEY }
-  - { name: claude-api, kind: anthropic,         model: claude-opus-4-8, api_key_env: ANTHROPIC_API_KEY }
-  - { name: local,      kind: openai-compatible, model: qwen3,           base_url: "http://localhost:11434/v1" }  # no key = no auth
-  - { name: codex,      kind: cli, cli: codex,  fast: true }
-  - { name: claude,     kind: cli, cli: claude }
+  - { name: gpt,    kind: openai,            model: gpt-5.1,         api_key_env: OPENAI_API_KEY }
+  - { name: claude, kind: anthropic,         model: claude-opus-4-8, api_key_env: ANTHROPIC_API_KEY }
+  - { name: local,  kind: openai-compatible, model: qwen3,           base_url: "http://192.168.1.10:8000/v1" }  # no key = no auth
+  - { name: codex,  kind: cli, cli: codex,  fast: true }
+  - { name: cc,     kind: cli, cli: claude }
 
 debate:
   rounds: 2             # 0 = broadcast + decide only
@@ -58,7 +103,7 @@ debate:
   min_models: 2         # abort if fewer than this respond
 
 validate:
-  reviewers: [codex]    # default reviewer(s) for `validate`
+  reviewers: [codex]    # default reviewer(s) for `abe validate`
 ```
 
 ## Decision protocols
@@ -79,7 +124,8 @@ The report is a *synthesized interpretation* — raw per-model answers are alway
 
 - CLI providers run read-only (`codex -s read-only --ephemeral`, `claude --permission-mode plan`).
 - `validate --files` secret-scans file contents before sending; pass `--allow-secrets` to override.
+- `abe serve` binds `127.0.0.1` by default. `--host 0.0.0.0` exposes the **unauthenticated** UI on all interfaces — only do this on a trusted LAN.
 
 ## Status
 
-v0.x. Surfaces: CLI (`debate` / `validate` / `models`), MCP server (`mcp`), and web UI + JSON API (`serve`). See `docs/specs/` and `docs/superpowers/plans/` for the design + plan.
+v0.x. CLI (`debate` / `validate` / `models`), MCP server (`mcp`), and web UI + JSON API (`serve`). See `docs/` for the original design spec + plan.
