@@ -1,5 +1,5 @@
 [package]
-name = "llm-debator"
+name = "abe"
 version = "0.1.0"
 edition = "2021"
 description = "Multi-provider LLM debate/consensus proxy (HTTP + CLI providers)"

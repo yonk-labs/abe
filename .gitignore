@@ -16,3 +16,7 @@ skill-output/
 
 # Logs / scratch
 *.log
+
+# Local working config (may point at private network addresses)
+/abe.yaml
+/llm-debator.yaml

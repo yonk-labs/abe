@@ -185,14 +185,14 @@ impl Config {
     }
 
     /// Load from an explicit path, or the default search path
-    /// (./llm-debator.yaml then ~/.config/llm-debator/config.yaml).
+    /// (./abe.yaml then ~/.config/abe/config.yaml).
     pub fn load_default(explicit: Option<&str>) -> anyhow::Result<Config> {
         let candidates: Vec<std::path::PathBuf> = match explicit {
             Some(p) => vec![std::path::PathBuf::from(p)],
             None => {
-                let mut v = vec![std::path::PathBuf::from("llm-debator.yaml")];
+                let mut v = vec![std::path::PathBuf::from("abe.yaml")];
                 if let Some(home) = std::env::var_os("HOME") {
-                    v.push(std::path::PathBuf::from(home).join(".config/llm-debator/config.yaml"));
+                    v.push(std::path::PathBuf::from(home).join(".config/abe/config.yaml"));
                 }
                 v
             }

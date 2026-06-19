@@ -1,5 +1,5 @@
 # Live debate using local CLIs (no API keys needed).
-# Run: llm-debator debate --config examples/cli-debate.yaml "your question"
+# Run: abe debate --config examples/cli-debate.yaml "your question"
 defaults:
   timeout_secs: 200
 

@@ -34,7 +34,7 @@ struct ValidateReq {
     context: Option<String>,
 }
 
-pub async fn serve(config_path: Option<String>, port: u16) -> anyhow::Result<()> {
+pub async fn serve(config_path: Option<String>, host: &str, port: u16) -> anyhow::Result<()> {
     let cfg = Config::load_default(config_path.as_deref())?;
     let state = AppState {
         cfg: Arc::new(cfg),
@@ -44,11 +44,26 @@ pub async fn serve(config_path: Option<String>, port: u16) -> anyhow::Result<()>
         .route("/api/debate", post(debate_handler))
         .route("/api/validate", post(validate_handler))
         .with_state(state);
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = parse_bind_addr(host, port)?;
+    if !addr.ip().is_loopback() {
+        eprintln!(
+            "warning: binding to {} exposes the UNAUTHENTICATED web UI on non-local interfaces",
+            addr.ip()
+        );
+    }
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    println!("llm-debator web UI: http://{addr}");
+    println!("Abe web UI: http://{addr}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Parse a host string + port into a bind address. Host must be a literal IP
+/// (e.g. 127.0.0.1 or 0.0.0.0) — hostnames are not resolved here.
+fn parse_bind_addr(host: &str, port: u16) -> anyhow::Result<std::net::SocketAddr> {
+    let ip: std::net::IpAddr = host
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid bind host {host:?} (expected an IP like 127.0.0.1)"))?;
+    Ok(std::net::SocketAddr::new(ip, port))
 }
 
 async fn index() -> Html<&'static str> {
@@ -100,10 +115,22 @@ async fn validate_handler(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::parse_bind_addr;
+
+    #[test]
+    fn parses_valid_hosts_and_rejects_garbage() {
+        assert_eq!(parse_bind_addr("127.0.0.1", 8080).unwrap().to_string(), "127.0.0.1:8080");
+        assert!(parse_bind_addr("0.0.0.0", 80).unwrap().ip().is_unspecified());
+        assert!(parse_bind_addr("not-an-ip", 8080).is_err());
+    }
+}
+
 const INDEX_HTML: &str = r##"<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>llm-debator</title>
+<title>Abe — multi-model debate</title>
 <style>
 body{font-family:system-ui,sans-serif;max-width:820px;margin:2rem auto;padding:0 1rem;color:#1a1a1a;background:#fafafa}
 h1{font-size:1.4rem;margin-bottom:.2rem}
@@ -123,8 +150,8 @@ pre{white-space:pre-wrap;word-break:break-word;margin:0}
 h3{margin:.8rem 0 .3rem}
 </style></head>
 <body>
-<h1>llm-debator</h1>
-<div class="sub">multi-model debate &amp; second-opinion validation</div>
+<h1>Abe</h1>
+<div class="sub">multi-model debate &amp; second-opinion validation &mdash; named for Lincoln</div>
 <div class="row">
   <label><input type="radio" name="mode" value="debate" checked> Debate</label>
   <label><input type="radio" name="mode" value="validate"> Validate</label>

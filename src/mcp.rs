@@ -1,5 +1,5 @@
 //! MCP stdio server exposing `debate` and `validate` as tools so agents can
-//! call llm-debator inline. Thin wrapper over the already-tested engines.
+//! call abe inline. Thin wrapper over the already-tested engines.
 
 use crate::config::Config;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -98,7 +98,7 @@ impl ServerHandler for DebatorServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "llm-debator: run a multi-model debate or get a second-opinion validation.".into(),
+                "abe: run a multi-model debate or get a second-opinion validation.".into(),
             ),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()

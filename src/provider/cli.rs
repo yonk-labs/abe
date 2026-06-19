@@ -155,7 +155,7 @@ fn temp_path(tag: &str) -> String {
     static C: AtomicU64 = AtomicU64::new(0);
     let n = C.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir()
-        .join(format!("llm-debator-{}-{}-{}", tag, std::process::id(), n))
+        .join(format!("abe-{}-{}-{}", tag, std::process::id(), n))
         .to_string_lossy()
         .into_owned()
 }

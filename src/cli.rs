@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "llm-debator",
+    name = "abe",
     version,
     about = "Multi-provider LLM debate/consensus proxy (HTTP + CLI providers)"
 )]
@@ -35,7 +35,7 @@ pub enum Command {
 pub struct DebateArgs {
     /// The question/prompt to debate.
     pub prompt: String,
-    /// Config path (default: ./llm-debator.yaml then ~/.config/llm-debator/config.yaml).
+    /// Config path (default: ./abe.yaml then ~/.config/abe/config.yaml).
     #[arg(short, long)]
     pub config: Option<String>,
     /// Override number of debate rounds.
@@ -59,7 +59,7 @@ pub async fn run_debate_cmd(args: DebateArgs) -> anyhow::Result<()> {
     }
 
     eprintln!(
-        "[llm-debator] {} models \u{b7} {} round(s) \u{b7} {} \u{b7} ~{} model calls",
+        "[abe] {} models \u{b7} {} round(s) \u{b7} {} \u{b7} ~{} model calls",
         cfg.models.len(),
         cfg.debate.rounds,
         format!("{:?}", cfg.debate.protocol).to_lowercase(),
@@ -80,7 +80,7 @@ pub async fn run_debate_cmd(args: DebateArgs) -> anyhow::Result<()> {
 pub struct ValidateArgs {
     /// The statement / decision / answer to validate.
     pub statement: String,
-    /// Config path (default: ./llm-debator.yaml then ~/.config/llm-debator/config.yaml).
+    /// Config path (default: ./abe.yaml then ~/.config/abe/config.yaml).
     #[arg(short, long)]
     pub config: Option<String>,
     /// Reviewer model name (default: validate.reviewers[0], else first model).
@@ -143,24 +143,28 @@ fn gather_context(files: Option<&str>, allow_secrets: bool) -> anyhow::Result<Op
 
 #[derive(Args)]
 pub struct ModelsArgs {
-    /// Config path (default: ./llm-debator.yaml then ~/.config/llm-debator/config.yaml).
+    /// Config path (default: ./abe.yaml then ~/.config/abe/config.yaml).
     #[arg(short, long)]
     pub config: Option<String>,
 }
 
 #[derive(Args)]
 pub struct McpArgs {
-    /// Config path (default: ./llm-debator.yaml then ~/.config/llm-debator/config.yaml).
+    /// Config path (default: ./abe.yaml then ~/.config/abe/config.yaml).
     #[arg(short, long)]
     pub config: Option<String>,
 }
 
 #[derive(Args)]
 pub struct ServeArgs {
-    /// Config path (default: ./llm-debator.yaml then ~/.config/llm-debator/config.yaml).
+    /// Config path (default: ./abe.yaml then ~/.config/abe/config.yaml).
     #[arg(short, long)]
     pub config: Option<String>,
-    /// Port to listen on (localhost).
+    /// IP to bind. Default 127.0.0.1 (local only). Use 0.0.0.0 to expose on the
+    /// network — the UI is UNAUTHENTICATED, so only do this on a trusted LAN.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+    /// Port to listen on.
     #[arg(short, long, default_value_t = 8080)]
     pub port: u16,
 }
