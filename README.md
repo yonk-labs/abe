@@ -38,23 +38,45 @@ The image runs the web UI bound to `0.0.0.0` inside the container. Two caveats:
 
 ### As a Claude Code plugin
 
-Install the binary first (Option 1 or 2 — it must be on your `PATH`), then:
+The plugin registers an MCP server that runs the `abe` binary, so the binary must be installed and configured **first**. Full flow:
+
+```bash
+# 1. install the binary (also runs the setup wizard)
+curl -fsSL https://raw.githubusercontent.com/yonk-labs/abe/main/install.sh | sh
+#    (or: cargo install --git https://github.com/yonk-labs/abe  &&  abe init)
+
+# 2. confirm it's on PATH and configured
+abe models          # should list your models
+```
+
+Then in Claude Code:
 
 ```
 /plugin marketplace add yonk-labs/abe
 /plugin install abe@yonk-labs
 ```
 
-You get the `abe` MCP tools (`debate`, `validate`) that Claude can call directly, plus two slash commands:
+Reload (`/reload-plugins` or restart Claude Code). You get the `abe` MCP tools (`debate`, `validate`) that Claude can call directly, plus two slash commands:
 
 ```
 /abe:debate Is Postgres a good default database?
 /abe:validate We should rewrite this service in Rust.
 ```
 
+**Prerequisites recap:** `abe` on your `PATH` + a config (`abe init` writes `~/.config/abe/config.yaml`). Without both, the MCP server can't start.
+
+### With Codex or other MCP clients
+
+`abe mcp` is a standard stdio MCP server, so it works with any MCP client — the Claude Code plugin marketplace above is Claude-specific, but the server isn't. After installing + `abe init`, register it in your client's MCP config with command `abe` and arg `mcp`. For Codex, add the same `abe mcp` invocation to your Codex MCP server config.
+
 ## Quick start
 
 ```bash
+# First-time setup — interactive wizard asks how many models you want and
+# walks you through each (OpenAI / Anthropic / local URL / CLI), then writes
+# the config. (Option 1's installer runs this for you.)
+abe init
+
 # Debate (reads ./abe.yaml, then ~/.config/abe/config.yaml by default)
 abe debate "Is Postgres a good default database?"
 
@@ -128,4 +150,4 @@ The report is a *synthesized interpretation* — raw per-model answers are alway
 
 ## Status
 
-v0.x. CLI (`debate` / `validate` / `models`), MCP server (`mcp`), and web UI + JSON API (`serve`). See `docs/` for the original design spec + plan.
+v0.x. CLI (`init` / `debate` / `validate` / `models`), MCP server (`mcp`), and web UI + JSON API (`serve`). See `docs/` for the original design spec + plan.

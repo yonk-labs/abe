@@ -60,36 +60,16 @@ mv "$tmp" "$INSTALL_DIR/$BIN"
 trap - EXIT INT TERM
 echo "abe-install: installed -> $INSTALL_DIR/$BIN"
 
-# --- starter config (only if none exists) ---
-mkdir -p "$CONFIG_DIR"
-if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
-  cat > "$CONFIG_DIR/config.yaml" <<'YAML'
-# Abe config — add 1 to 5 models, then:  abe debate "your question"
-defaults:
-  temperature: 0.7
-  max_tokens: 1024
-  timeout_secs: 120
-
-models:
-  # A model on your network (vLLM / Ollama / LM Studio). No key = no auth.
-  # - { name: local, kind: openai-compatible, model: "your-model-id", base_url: "http://192.168.1.10:8000/v1" }
-
-  # A cloud model (set the env var):
-  # - { name: gpt, kind: openai, model: gpt-5.1, api_key_env: OPENAI_API_KEY }
-
-  # Local CLIs (no API key; must be installed and on PATH):
-  - { name: codex,  kind: cli, cli: codex, fast: true }
-  - { name: claude, kind: cli, cli: claude }
-
-debate:
-  rounds: 1
-  protocol: synthesis
-  anonymize: true
-
-validate:
-  reviewers: [codex]
-YAML
-  echo "abe-install: wrote starter config -> $CONFIG_DIR/config.yaml (edit it to add your models)"
+# --- configure models via the interactive wizard ---
+# `curl | sh` can't read stdin (it IS the script), so run `abe init` against the
+# terminal through /dev/tty when one is available. Never clobber an existing config.
+if [ -f "$CONFIG_DIR/config.yaml" ]; then
+  echo "abe-install: existing config at $CONFIG_DIR/config.yaml (left as-is; run 'abe init' to redo)"
+elif [ -r /dev/tty ]; then
+  echo "abe-install: launching setup wizard (abe init)..."
+  "$INSTALL_DIR/$BIN" init < /dev/tty || echo "abe-install: setup skipped — run 'abe init' anytime"
+else
+  echo "abe-install: no terminal detected — run 'abe init' to set up your models"
 fi
 
 # --- PATH hint ---

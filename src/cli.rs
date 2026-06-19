@@ -29,6 +29,8 @@ pub enum Command {
     Mcp(McpArgs),
     /// Serve the web UI + JSON API (POST /api/debate, /api/validate).
     Serve(ServeArgs),
+    /// Interactive setup: ask how many models + their details, write a config YAML.
+    Init,
 }
 
 #[derive(Args)]
