@@ -1,0 +1,29 @@
+# Full example showing every provider kind. HTTP providers need the named env
+# var set; CLI providers need the binary on PATH (no keys). Mix freely.
+defaults:
+  temperature: 0.7
+  max_tokens: 1024
+  timeout_secs: 120
+  retries: 2
+  max_context_kb: 50
+
+models:
+  # HTTP — needs OPENAI_API_KEY
+  - { name: gpt, kind: openai, model: gpt-5.1, api_key_env: OPENAI_API_KEY }
+  # HTTP — needs ANTHROPIC_API_KEY
+  - { name: claude-api, kind: anthropic, model: claude-opus-4-8, api_key_env: ANTHROPIC_API_KEY }
+  # HTTP — local OpenAI-compatible endpoint (Ollama/vLLM/LM Studio); no key
+  - { name: local, kind: openai-compatible, model: qwen3, base_url: "http://localhost:11434/v1" }
+  # CLI — local subprocesses, no keys
+  - { name: codex, kind: cli, cli: codex, fast: true }
+  - { name: claude, kind: cli, cli: claude }
+
+debate:
+  rounds: 2
+  protocol: synthesis
+  chairman: gpt
+  anonymize: true
+  min_models: 2
+
+validate:
+  reviewers: [codex]
