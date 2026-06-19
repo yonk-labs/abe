@@ -20,6 +20,6 @@ async fn main() -> anyhow::Result<()> {
         cli::Command::Models(args) => cli::run_models_cmd(args).await,
         cli::Command::Mcp(args) => mcp::serve(args.config).await,
         cli::Command::Serve(args) => server::serve(args.config, &args.host, args.port).await,
-        cli::Command::Init => init::run(),
+        cli::Command::Init => init::run().await,
     }
 }

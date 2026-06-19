@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "abe"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -13,6 +13,7 @@ dependencies = [
  "futures",
  "genai",
  "regex",
+ "reqwest",
  "rmcp",
  "schemars 0.8.22",
  "serde",

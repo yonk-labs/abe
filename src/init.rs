@@ -43,6 +43,9 @@ pub fn render_yaml(
                 if let Some(c) = &m.cli {
                     parts.push(format!("cli: {c}"));
                 }
+                if let Some(x) = &m.model {
+                    parts.push(format!("model: \"{x}\""));
+                }
                 if m.fast {
                     parts.push("fast: true".into());
                 }
@@ -82,7 +85,7 @@ pub fn render_yaml(
 }
 
 /// Run the interactive wizard against stdin, write the YAML to the chosen path.
-pub fn run() -> Result<()> {
+pub async fn run() -> Result<()> {
     let stdin = std::io::stdin();
     let mut r = stdin.lock();
     println!("abe init — let's build your config.\n");
@@ -98,7 +101,7 @@ pub fn run() -> Result<()> {
     let mut models = Vec::with_capacity(n);
     for i in 1..=n {
         println!("\n--- model {i} of {n} ---");
-        let spec = prompt_model(&mut r, i)?;
+        let spec = prompt_model(&mut r, i).await?;
         models.push(spec);
     }
 
@@ -147,7 +150,7 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn prompt_model(r: &mut impl BufRead, i: usize) -> Result<ModelSpec> {
+async fn prompt_model(r: &mut impl BufRead, i: usize) -> Result<ModelSpec> {
     let name = prompt(r, "Name (e.g. gpt, claude, local)", Some(&format!("m{i}")))?;
     println!("  Type:  1) OpenAI   2) Anthropic   3) OpenAI-compatible URL (local/vLLM/Ollama)   4) CLI (codex/claude/opencode)");
     let kind_choice = loop {
@@ -169,20 +172,26 @@ fn prompt_model(r: &mut impl BufRead, i: usize) -> Result<ModelSpec> {
     match kind_choice.as_str() {
         "1" => {
             spec.kind = "openai".into();
-            spec.model = Some(prompt(r, "  Model id", Some("gpt-5.1"))?);
-            spec.api_key_env = Some(prompt(r, "  API key env var", Some("OPENAI_API_KEY"))?);
+            let env = prompt(r, "  API key env var", Some("OPENAI_API_KEY"))?;
+            let key = std::env::var(&env).ok();
+            spec.api_key_env = Some(env);
+            spec.model =
+                Some(choose_model(r, "https://api.openai.com/v1", key.as_deref(), Some("gpt-5.5"), true).await?);
         }
         "2" => {
             spec.kind = "anthropic".into();
+            // Anthropic's models endpoint uses different auth headers; keep a typed default.
             spec.model = Some(prompt(r, "  Model id", Some("claude-opus-4-8"))?);
             spec.api_key_env = Some(prompt(r, "  API key env var", Some("ANTHROPIC_API_KEY"))?);
         }
         "3" => {
             spec.kind = "openai-compatible".into();
-            spec.model = Some(prompt(r, "  Model id", None)?);
-            spec.base_url = Some(prompt(r, "  Base URL", Some("http://192.168.1.10:8000/v1"))?);
-            let key = prompt(r, "  API key env var (blank = no auth)", Some(""))?;
-            spec.api_key_env = if key.is_empty() { None } else { Some(key) };
+            let base = prompt(r, "  Base URL", Some("http://192.168.1.10:8000/v1"))?;
+            let env = prompt(r, "  API key env var (blank = no auth)", Some(""))?;
+            let key = if env.is_empty() { None } else { std::env::var(&env).ok() };
+            spec.api_key_env = if env.is_empty() { None } else { Some(env) };
+            spec.model = Some(choose_model(r, &base, key.as_deref(), None, false).await?);
+            spec.base_url = Some(base);
         }
         _ => {
             spec.kind = "cli".into();
@@ -193,11 +202,123 @@ fn prompt_model(r: &mut impl BufRead, i: usize) -> Result<ModelSpec> {
                 }
                 println!("    choose codex, claude, or opencode");
             };
-            spec.cli = Some(cli);
+            spec.cli = Some(cli.clone());
+            // opencode requires an explicit provider/model; codex/claude can use
+            // the account default (blank).
+            if cli == "opencode" {
+                spec.model = Some(loop {
+                    let v = prompt(r, "  Model (provider/model — required for opencode)", None)?;
+                    if !v.is_empty() {
+                        break v;
+                    }
+                    println!("    opencode needs a model, e.g. ollama/llama3.1 or openai/gpt-5.5");
+                });
+            } else {
+                let m = prompt(r, "  Model (blank = the CLI's default account model)", Some(""))?;
+                spec.model = if m.is_empty() { None } else { Some(m) };
+            }
             spec.fast = prompt(r, "  Fast mode? (y/N)", Some("N"))?.eq_ignore_ascii_case("y");
         }
     }
     Ok(spec)
+}
+
+/// Offer to fetch the endpoint's model list and let the user pick by number.
+/// Falls back to manual entry on decline / failure / empty list. `filter_chat`
+/// trims a long OpenAI list to chat-ish ids (gpt*/o*). Always returns non-empty.
+async fn choose_model(
+    r: &mut impl BufRead,
+    base_url: &str,
+    api_key: Option<&str>,
+    default: Option<&str>,
+    filter_chat: bool,
+) -> Result<String> {
+    let offer = prompt(r, "  Fetch available models from the endpoint? (Y/n)", Some("Y"))?;
+    if !offer.eq_ignore_ascii_case("n") {
+        match fetch_models(base_url, api_key).await {
+            Ok(ids) if !ids.is_empty() => {
+                let ids = filter_sort(ids, filter_chat);
+                println!("  available models:");
+                for (j, m) in ids.iter().enumerate() {
+                    println!("    {}) {}", j + 1, m);
+                }
+                loop {
+                    let pick = prompt(r, "  Pick a number, or type a model id", default)?;
+                    if let Ok(idx) = pick.parse::<usize>() {
+                        if (1..=ids.len()).contains(&idx) {
+                            return Ok(ids[idx - 1].clone());
+                        }
+                        println!("    out of range (1-{})", ids.len());
+                        continue;
+                    }
+                    if !pick.is_empty() {
+                        return Ok(pick);
+                    }
+                    if let Some(d) = default {
+                        return Ok(d.to_string());
+                    }
+                    println!("    enter a number or a model id");
+                }
+            }
+            Ok(_) => println!("  (endpoint returned no models — enter manually)"),
+            Err(e) => println!("  (couldn't fetch models: {e} — enter manually)"),
+        }
+    }
+    // manual fallback (model id is required)
+    loop {
+        let m = prompt(r, "  Model id", default)?;
+        if !m.is_empty() {
+            return Ok(m);
+        }
+        println!("    a model id is required");
+    }
+}
+
+fn filter_sort(ids: Vec<String>, filter_chat: bool) -> Vec<String> {
+    let mut ids = if filter_chat {
+        let chat: Vec<String> = ids
+            .iter()
+            .filter(|m| m.starts_with("gpt") || m.starts_with('o'))
+            .cloned()
+            .collect();
+        if chat.is_empty() {
+            ids
+        } else {
+            chat
+        }
+    } else {
+        ids
+    };
+    ids.sort();
+    ids
+}
+
+/// GET `{base_url}/models` and return the `data[].id` values. Works for OpenAI
+/// (Bearer key) and OpenAI-compatible servers (vLLM/Ollama/LM Studio, often no auth).
+async fn fetch_models(base_url: &str, api_key: Option<&str>) -> Result<Vec<String>> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let mut req = client.get(&url);
+    if let Some(k) = api_key.filter(|k| !k.is_empty()) {
+        req = req.bearer_auth(k);
+    }
+    let resp = req.send().await.with_context(|| format!("GET {url}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("{url} returned {}", resp.status());
+    }
+    let body: serde_json::Value = resp.json().await.context("parsing models response")?;
+    let ids = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(|x| x.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ids)
 }
 
 /// Offer to customize the `defaults` block. Pressing N (or enter) keeps the
@@ -297,10 +418,10 @@ mod tests {
             ModelSpec {
                 name: "cx".into(),
                 kind: "cli".into(),
-                model: None,
+                model: Some("ollama/llama3.1".into()),
                 base_url: None,
                 api_key_env: None,
-                cli: Some("codex".into()),
+                cli: Some("opencode".into()),
                 fast: true,
             },
         ];
@@ -314,6 +435,7 @@ mod tests {
         assert_eq!(cfg.models[0].name, "gpt");
         assert_eq!(cfg.models[1].base_url.as_deref(), Some("http://192.168.1.10:8000/v1"));
         assert!(cfg.models[2].fast);
+        assert_eq!(cfg.models[2].model.as_deref(), Some("ollama/llama3.1"), "cli model must round-trip");
         assert_eq!(cfg.defaults.max_tokens, 2048, "customized default must round-trip");
         assert_eq!(cfg.debate.rounds, 1);
         assert_eq!(cfg.debate.chairman.as_deref(), Some("gpt"));

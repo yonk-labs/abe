@@ -1,7 +1,7 @@
 {
   "name": "abe",
   "displayName": "Abe",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Multi-model LLM debate & second-opinion validation, named for Lincoln. Exposes debate/validate as MCP tools plus /abe:debate and /abe:validate.",
   "author": {
     "name": "yonk-labs",

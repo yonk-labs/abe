@@ -74,7 +74,9 @@ Reload (`/reload-plugins` or restart Claude Code). You get the `abe` MCP tools (
 ```bash
 # First-time setup — interactive wizard asks how many models you want and
 # walks you through each (OpenAI / Anthropic / local URL / CLI), then writes
-# the config. (Option 1's installer runs this for you.)
+# the config. For OpenAI and local/OpenAI-compatible endpoints it can query
+# the endpoint's model list so you pick from a menu instead of typing an id.
+# (Option 1's installer runs this for you.)
 abe init
 
 # Debate (reads ./abe.yaml, then ~/.config/abe/config.yaml by default)
@@ -111,7 +113,7 @@ defaults:
   max_context_kb: 50    # warn when assembled context exceeds this
 
 models:
-  - { name: gpt,    kind: openai,            model: gpt-5.1,         api_key_env: OPENAI_API_KEY }
+  - { name: gpt,    kind: openai,            model: gpt-5.5,         api_key_env: OPENAI_API_KEY }
   - { name: claude, kind: anthropic,         model: claude-opus-4-8, api_key_env: ANTHROPIC_API_KEY }
   - { name: local,  kind: openai-compatible, model: qwen3,           base_url: "http://192.168.1.10:8000/v1" }  # no key = no auth
   - { name: codex,  kind: cli, cli: codex,  fast: true }

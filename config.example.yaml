@@ -12,7 +12,7 @@ models:
   # - { name: local, kind: openai-compatible, model: "your-model-id", base_url: "http://192.168.1.10:8000/v1" }
 
   # --- A cloud model (set the env var with your key) ---
-  # - { name: gpt,    kind: openai,    model: gpt-5.1,         api_key_env: OPENAI_API_KEY }
+  # - { name: gpt,    kind: openai,    model: gpt-5.5,         api_key_env: OPENAI_API_KEY }
   # - { name: claude, kind: anthropic, model: claude-opus-4-8, api_key_env: ANTHROPIC_API_KEY }
 
   # --- Local CLIs (no API key needed; must be installed and on PATH) ---
