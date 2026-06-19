@@ -10,7 +10,7 @@
       "name": "abe",
       "source": "./",
       "description": "Multi-model LLM debate & second-opinion validation (named for Lincoln). MCP tools plus /abe:debate and /abe:validate.",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "author": {
         "name": "yonk-labs",
         "email": "matt@theyonk.com"
