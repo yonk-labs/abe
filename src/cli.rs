@@ -57,6 +57,14 @@ pub async fn run_debate_cmd(args: DebateArgs) -> anyhow::Result<()> {
         .map(|m| build_provider(m, &cfg.defaults))
         .collect::<anyhow::Result<_>>()?;
 
+    eprintln!(
+        "[llm-debator] {} models \u{b7} {} round(s) \u{b7} {} \u{b7} ~{} model calls",
+        cfg.models.len(),
+        cfg.debate.rounds,
+        format!("{:?}", cfg.debate.protocol).to_lowercase(),
+        crate::debate::estimate_calls(cfg.models.len(), cfg.debate.rounds, cfg.debate.protocol),
+    );
+
     let chair_name = cfg
         .resolved_chairman()
         .context("no chairman and no models to fall back to")?

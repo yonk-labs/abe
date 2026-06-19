@@ -273,7 +273,6 @@ impl Provider for CliProvider {
             Ok(Ok(text)) => Ok(Answer {
                 model_name: self.name.clone(),
                 text,
-                usage: None,
                 elapsed_ms,
             }),
         }

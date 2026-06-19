@@ -13,27 +13,19 @@ pub struct Prompt {
     pub user: String,
     pub temperature: f32,
     pub max_tokens: u32,
-    /// Request structured (JSON) output where the backend supports it.
-    pub json_mode: bool,
 }
 
+#[cfg(test)]
 impl Prompt {
-    /// Convenience constructor with sane defaults.
+    /// Convenience constructor with sane defaults (test helper).
     pub fn user(text: impl Into<String>) -> Self {
         Prompt {
             system: None,
             user: text.into(),
             temperature: 0.7,
             max_tokens: 1024,
-            json_mode: false,
         }
     }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Usage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
 }
 
 /// A model's reply.
@@ -41,7 +33,6 @@ pub struct Usage {
 pub struct Answer {
     pub model_name: String,
     pub text: String,
-    pub usage: Option<Usage>,
     pub elapsed_ms: u64,
 }
 
@@ -163,7 +154,6 @@ impl Provider for MockProvider {
         Ok(Answer {
             model_name: self.name.clone(),
             text,
-            usage: None,
             elapsed_ms: 0,
         })
     }

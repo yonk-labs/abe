@@ -10,6 +10,7 @@ use serde::Serialize;
 pub struct RoundAnswer {
     pub model: String,
     pub text: String,
+    pub elapsed_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -75,6 +76,15 @@ pub async fn run_debate(
     let models_used: Vec<String> = latest.iter().map(|(n, _)| n.clone()).collect();
 
     let labeled = label_all(&latest, cfg.debate.anonymize);
+    let max_bytes = cfg.defaults.max_context_kb as usize * 1024;
+    if labeled.len() > max_bytes {
+        warnings.push(format!(
+            "decision context is ~{}KB, exceeds max_context_kb={}",
+            labeled.len() / 1024,
+            cfg.defaults.max_context_kb
+        ));
+    }
+
     let (final_answer, report) = match cfg.debate.protocol {
         Protocol::Synthesis => {
             chairman_decide(chairman, cfg, synthesis_prompt(question, &labeled), &latest, &mut warnings).await
@@ -101,7 +111,6 @@ fn base_prompt(cfg: &Config, question: &str) -> Prompt {
         user: question.to_string(),
         temperature: cfg.defaults.temperature,
         max_tokens: cfg.defaults.max_tokens,
-        json_mode: false,
     }
 }
 
@@ -114,11 +123,13 @@ async fn call_one(p: &dyn Provider, prompt: &Prompt) -> RoundAnswer {
         Ok(a) => RoundAnswer {
             model: a.model_name,
             text: a.text,
+            elapsed_ms: a.elapsed_ms,
             error: None,
         },
         Err(e) => RoundAnswer {
             model: p.name().to_string(),
             text: String::new(),
+            elapsed_ms: 0,
             error: Some(e.to_string()),
         },
     }
@@ -182,7 +193,6 @@ Critique the other answers â€” point out any errors or points of disagreement â€
         user,
         temperature: cfg.defaults.temperature,
         max_tokens: cfg.defaults.max_tokens,
-        json_mode: false,
     }
 }
 
@@ -200,7 +210,6 @@ async fn chairman_decide(
         user,
         temperature: cfg.defaults.temperature,
         max_tokens: cfg.defaults.max_tokens,
-        json_mode: true,
     };
     match chairman.complete(&prompt).await {
         Ok(a) => {
@@ -253,6 +262,14 @@ fn majority_decide(latest: &[(String, String)]) -> (String, Report) {
 
 fn normalize(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// Estimate total model calls for cost awareness: broadcast + critique rounds,
+/// plus one chairman call for synthesis/judge (majority needs none).
+pub fn estimate_calls(models: usize, rounds: u32, protocol: Protocol) -> usize {
+    let base = models * (rounds as usize + 1);
+    let decision = if matches!(protocol, Protocol::Majority) { 0 } else { 1 };
+    base + decision
 }
 
 #[cfg(test)]
@@ -408,5 +425,28 @@ mod tests {
         assert!(!res.models_used.contains(&"c".to_string()));
         let r0 = &res.rounds[0];
         assert!(r0.answers.iter().any(|a| a.model == "c" && a.error.is_some()));
+    }
+
+    #[test]
+    fn estimate_calls_counts_rounds_and_decision() {
+        use crate::config::Protocol;
+        assert_eq!(estimate_calls(3, 2, Protocol::Synthesis), 10); // 3*(2+1) + 1
+        assert_eq!(estimate_calls(3, 2, Protocol::Majority), 9); // no chairman call
+    }
+
+    #[tokio::test]
+    async fn warns_on_oversize_context() {
+        let mut c = cfg(0);
+        c.defaults.max_context_kb = 0; // force the warning
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::new("a", ["some answer"])),
+            Box::new(MockProvider::new("b", ["another answer"])),
+        ];
+        let chair = MockProvider::new(
+            "chair",
+            [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
+        );
+        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        assert!(res.warnings.iter().any(|w| w.contains("max_context_kb")));
     }
 }

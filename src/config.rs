@@ -68,18 +68,13 @@ pub enum CliKind {
     Opencode,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
+    #[default]
     Synthesis,
     Majority,
     Judge,
-}
-
-impl Default for Protocol {
-    fn default() -> Self {
-        Protocol::Synthesis
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -179,10 +174,6 @@ impl Config {
             }
         }
         Ok(())
-    }
-
-    pub fn model(&self, name: &str) -> Option<&ModelCfg> {
-        self.models.iter().find(|m| m.name == name)
     }
 
     /// Chairman if set, else the first model (lazy-friendly default).

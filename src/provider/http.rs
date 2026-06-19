@@ -7,7 +7,7 @@ use crate::provider::{Answer, Prompt, Provider, ProviderError};
 use anyhow::Context;
 use async_trait::async_trait;
 use genai::adapter::AdapterKind;
-use genai::chat::{ChatMessage, ChatRequest};
+use genai::chat::{ChatMessage, ChatOptions, ChatRequest};
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, ModelIden, ServiceTarget};
 use std::time::Instant;
@@ -98,11 +98,16 @@ impl Provider for HttpProvider {
         }
         msgs.push(ChatMessage::user(prompt.user.clone()));
         let req = ChatRequest::new(msgs);
+        let temperature = prompt.temperature as f64;
+        let max_tokens = prompt.max_tokens;
 
         let start = Instant::now();
         let res = crate::provider::retry_async(self.attempts, || {
             let req = req.clone();
-            async move { self.client.exec_chat(&self.model, req, None).await }
+            let opts = ChatOptions::default()
+                .with_temperature(temperature)
+                .with_max_tokens(max_tokens);
+            async move { self.client.exec_chat(&self.model, req, Some(&opts)).await }
         })
         .await;
         let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -110,7 +115,6 @@ impl Provider for HttpProvider {
             Ok(r) => Ok(Answer {
                 model_name: self.name.clone(),
                 text: r.first_text().map(|s| s.to_string()).unwrap_or_default(),
-                usage: None,
                 elapsed_ms,
             }),
             Err(e) => Err(ProviderError::Backend {
