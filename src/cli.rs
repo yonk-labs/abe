@@ -27,6 +27,8 @@ pub enum Command {
     Validate(ValidateArgs),
     /// List configured models and check basic reachability (CLI on PATH, keys set).
     Models(ModelsArgs),
+    /// Run as an MCP server over stdio, exposing `debate` and `validate` tools.
+    Mcp(McpArgs),
 }
 
 #[derive(Args)]
@@ -165,6 +167,13 @@ fn gather_context(files: Option<&str>, allow_secrets: bool) -> anyhow::Result<Op
 
 #[derive(Args)]
 pub struct ModelsArgs {
+    /// Config path (default: ./llm-debator.yaml then ~/.config/llm-debator/config.yaml).
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args)]
+pub struct McpArgs {
     /// Config path (default: ./llm-debator.yaml then ~/.config/llm-debator/config.yaml).
     #[arg(short, long)]
     pub config: Option<String>,

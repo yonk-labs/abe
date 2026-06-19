@@ -16,6 +16,8 @@ anyhow = "1"
 regex = "1"
 futures = "0.3"
 genai = "0.6"
+rmcp = { version = "0.16", features = ["server", "macros", "transport-io"] }
+schemars = "0.8"
 
 [profile.release]
 strip = true
