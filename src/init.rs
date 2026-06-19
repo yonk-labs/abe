@@ -172,9 +172,10 @@ async fn prompt_model(r: &mut impl BufRead, i: usize) -> Result<ModelSpec> {
     match kind_choice.as_str() {
         "1" => {
             spec.kind = "openai".into();
-            let env = prompt(r, "  API key env var", Some("OPENAI_API_KEY"))?;
-            let key = std::env::var(&env).ok();
-            spec.api_key_env = Some(env);
+            let input = prompt(r, "  OpenAI API key (paste it, or the name of an env var holding it)", Some("OPENAI_API_KEY"))?;
+            let (env_name, key, pasted) = resolve_key_input(&input, "OPENAI_API_KEY");
+            warn_key(env_name.as_deref(), key.as_deref(), pasted);
+            spec.api_key_env = env_name;
             spec.model =
                 Some(choose_model(r, "https://api.openai.com/v1", key.as_deref(), Some("gpt-5.5"), true).await?);
         }
@@ -186,10 +187,12 @@ async fn prompt_model(r: &mut impl BufRead, i: usize) -> Result<ModelSpec> {
         }
         "3" => {
             spec.kind = "openai-compatible".into();
-            let base = prompt(r, "  Base URL", Some("http://192.168.1.10:8000/v1"))?;
-            let env = prompt(r, "  API key env var (blank = no auth)", Some(""))?;
-            let key = if env.is_empty() { None } else { std::env::var(&env).ok() };
-            spec.api_key_env = if env.is_empty() { None } else { Some(env) };
+            let base = normalize_url(&prompt(r, "  Base URL", Some("http://192.168.1.10:8000/v1"))?);
+            let store_as = format!("{}_API_KEY", spec.name.to_ascii_uppercase());
+            let input = prompt(r, "  API key (blank = no auth; paste a key or an env var name)", Some(""))?;
+            let (env_name, key, pasted) = resolve_key_input(&input, &store_as);
+            warn_key(env_name.as_deref(), key.as_deref(), pasted);
+            spec.api_key_env = env_name;
             spec.model = Some(choose_model(r, &base, key.as_deref(), None, false).await?);
             spec.base_url = Some(base);
         }
@@ -389,10 +392,77 @@ fn expand_tilde(path: &str) -> String {
     }
 }
 
+/// Prepend `http://` when the user omits the scheme, so reqwest/genai can parse
+/// it. A schemeless `host:port/v1` is not a valid URL and fails before connecting.
+fn normalize_url(u: &str) -> String {
+    let u = u.trim();
+    if u.starts_with("http://") || u.starts_with("https://") {
+        u.to_string()
+    } else {
+        format!("http://{u}")
+    }
+}
+
+/// Classify the "API key" answer. The user may type an env-var NAME
+/// (`OPENAI_API_KEY`) or paste the actual secret. Returns
+/// `(env_name_to_store, key_for_immediate_fetch, was_pasted)`. A pasted secret is
+/// used for the live fetch but stored only as a NAME — abe reads keys from the
+/// environment at runtime, never from the YAML, so secrets never land on disk.
+fn resolve_key_input(input: &str, store_as: &str) -> (Option<String>, Option<String>, bool) {
+    let v = input.trim();
+    if v.is_empty() {
+        return (None, None, false);
+    }
+    let looks_like_env_name = v.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && v.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    if looks_like_env_name {
+        (Some(v.to_string()), std::env::var(v).ok(), false)
+    } else {
+        (Some(store_as.to_string()), Some(v.to_string()), true)
+    }
+}
+
+/// Tell the user what we stored vs. what they must export, without echoing the
+/// secret. Catches the two footguns: pasting a key, and naming an unset var.
+fn warn_key(env_name: Option<&str>, key: Option<&str>, pasted: bool) {
+    match (env_name, pasted) {
+        (Some(name), true) => {
+            println!("  (that looks like a key, not a variable name — using it to fetch now, but NOT writing it to the config)");
+            println!("  (abe reads keys from the environment at debate time — add to your shell:  export {name}='<your key>')");
+        }
+        (Some(name), false) if key.is_none() => {
+            println!("  (heads up: ${name} isn't set in this shell — fetch and debates can't authenticate until you  export {name}=...)");
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    #[test]
+    fn normalize_url_adds_missing_scheme() {
+        assert_eq!(normalize_url("192.168.1.193:8000/v1"), "http://192.168.1.193:8000/v1");
+        assert_eq!(normalize_url("http://x/v1"), "http://x/v1");
+        assert_eq!(normalize_url("https://x/v1"), "https://x/v1");
+    }
+
+    #[test]
+    fn resolve_key_distinguishes_name_from_pasted_secret() {
+        let (env, _key, pasted) = resolve_key_input("OPENAI_API_KEY", "OPENAI_API_KEY");
+        assert_eq!(env.as_deref(), Some("OPENAI_API_KEY"));
+        assert!(!pasted, "an env-var name must not be treated as a secret");
+
+        let (env, key, pasted) = resolve_key_input("sk-proj-abc123", "OPENAI_API_KEY");
+        assert_eq!(env.as_deref(), Some("OPENAI_API_KEY"), "pasted key stored as the standard name only");
+        assert_eq!(key.as_deref(), Some("sk-proj-abc123"), "pasted key still used for the live fetch");
+        assert!(pasted);
+
+        let (env, key, pasted) = resolve_key_input("  ", "OPENAI_API_KEY");
+        assert!(env.is_none() && key.is_none() && !pasted, "blank = no auth");
+    }
 
     #[test]
     fn rendered_yaml_round_trips_through_config_parser() {
