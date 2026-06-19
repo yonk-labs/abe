@@ -1,3 +1,4 @@
+mod config;
 mod provider;
 
 fn main() {
