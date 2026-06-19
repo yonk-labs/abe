@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 
 pub mod cli;
+pub mod http;
 
 /// A single request to a model.
 #[derive(Debug, Clone)]
