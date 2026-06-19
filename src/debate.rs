@@ -2,7 +2,7 @@
 
 use crate::config::{Config, Protocol};
 use crate::provider::{Prompt, Provider};
-use crate::report::{parse_synthesis, synthesis_prompt, Report};
+use crate::report::{judge_prompt, parse_synthesis, synthesis_prompt, Report};
 use futures::future::join_all;
 use serde::Serialize;
 
@@ -65,36 +65,15 @@ pub async fn run_debate(
     let latest = latest_successful(&rounds);
     let models_used: Vec<String> = latest.iter().map(|(n, _)| n.clone()).collect();
 
+    let labeled = label_all(&latest, cfg.debate.anonymize);
     let (final_answer, report) = match cfg.debate.protocol {
         Protocol::Synthesis => {
-            let labeled = label_all(&latest, cfg.debate.anonymize);
-            let prompt = Prompt {
-                system: None,
-                user: synthesis_prompt(question, &labeled),
-                temperature: cfg.defaults.temperature,
-                max_tokens: cfg.defaults.max_tokens,
-                json_mode: true,
-            };
-            match chairman.complete(&prompt).await {
-                Ok(a) => {
-                    let (fa, rep, w) = parse_synthesis(&a.text);
-                    if let Some(w) = w {
-                        warnings.push(w);
-                    }
-                    (fa, rep)
-                }
-                Err(e) => {
-                    warnings.push(format!("chairman failed: {e}"));
-                    (
-                        latest.first().map(|(_, t)| t.clone()).unwrap_or_default(),
-                        Report::default(),
-                    )
-                }
-            }
+            chairman_decide(chairman, cfg, synthesis_prompt(question, &labeled), &latest, &mut warnings).await
         }
-        Protocol::Majority | Protocol::Judge => {
-            anyhow::bail!("protocol not yet implemented in v0.1 (synthesis only)")
+        Protocol::Judge => {
+            chairman_decide(chairman, cfg, judge_prompt(question, &labeled), &latest, &mut warnings).await
         }
+        Protocol::Majority => majority_decide(&latest),
     };
 
     Ok(DebateResult {
@@ -198,6 +177,75 @@ Critique the other answers â€” point out any errors or points of disagreement â€
     }
 }
 
+/// Synthesis/judge: hand the labeled answers to the chairman model, parse its
+/// JSON into (final_answer, report). Falls back to the first answer on failure.
+async fn chairman_decide(
+    chairman: &dyn Provider,
+    cfg: &Config,
+    user: String,
+    latest: &[(String, String)],
+    warnings: &mut Vec<String>,
+) -> (String, Report) {
+    let prompt = Prompt {
+        system: None,
+        user,
+        temperature: cfg.defaults.temperature,
+        max_tokens: cfg.defaults.max_tokens,
+        json_mode: true,
+    };
+    match chairman.complete(&prompt).await {
+        Ok(a) => {
+            let (fa, rep, w) = parse_synthesis(&a.text);
+            if let Some(w) = w {
+                warnings.push(w);
+            }
+            (fa, rep)
+        }
+        Err(e) => {
+            warnings.push(format!("chairman failed: {e}"));
+            (
+                latest.first().map(|(_, t)| t.clone()).unwrap_or_default(),
+                Report::default(),
+            )
+        }
+    }
+}
+
+/// Majority: deterministic clustering by normalized text (no extra LLM call).
+/// Picks the largest cluster; reports the count and lists minority answers.
+fn majority_decide(latest: &[(String, String)]) -> (String, Report) {
+    use std::collections::BTreeMap;
+    let total = latest.len();
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (i, (_, text)) in latest.iter().enumerate() {
+        groups.entry(normalize(text)).or_default().push(i);
+    }
+    let Some(best) = groups.values().max_by_key(|v| v.len()) else {
+        return (String::new(), Report::default());
+    };
+    let rep_idx = best[0];
+    let count = best.len();
+    let final_answer = latest[rep_idx].1.clone();
+    let agreements = vec![format!("{count} of {total} models gave the majority answer")];
+    let mut disagreements = Vec::new();
+    for members in groups.values() {
+        if members[0] != rep_idx {
+            disagreements.push(latest[members[0]].1.clone());
+        }
+    }
+    (
+        final_answer,
+        Report {
+            agreements,
+            disagreements,
+        },
+    )
+}
+
+fn normalize(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +316,52 @@ mod tests {
         assert!(!round1.contains("a-r0"), "should exclude its own answer");
         assert!(round1.contains("Solution A"), "labels should be anonymized");
         assert!(!round1.contains("### b"), "should not label by model name");
+    }
+
+    #[tokio::test]
+    async fn n_rounds_produces_n_plus_one_round_records() {
+        let c = cfg(3);
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::new("a", ["a"])),
+            Box::new(MockProvider::new("b", ["b"])),
+        ];
+        let chair = MockProvider::new(
+            "chair",
+            [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
+        );
+        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        assert_eq!(res.rounds.len(), 4); // round 0 + 3 critique rounds
+    }
+
+    #[tokio::test]
+    async fn majority_picks_most_common_answer() {
+        let mut c = cfg(0);
+        c.debate.protocol = crate::config::Protocol::Majority;
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::new("a", ["42"])),
+            Box::new(MockProvider::new("b", ["42"])),
+            Box::new(MockProvider::new("c", ["7"])),
+        ];
+        let chair = MockProvider::new("chair", ["unused"]);
+        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        assert_eq!(res.final_answer, "42");
+        assert!(res.report.agreements[0].contains("2 of 3"));
+    }
+
+    #[tokio::test]
+    async fn judge_uses_chairman_pick() {
+        let mut c = cfg(0);
+        c.debate.protocol = crate::config::Protocol::Judge;
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::new("a", ["answer-a"])),
+            Box::new(MockProvider::new("b", ["answer-b"])),
+        ];
+        let chair = MockProvider::new(
+            "chair",
+            [r#"{"final_answer":"answer-b","agreements":[],"disagreements":["a was weaker"]}"#],
+        );
+        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        assert_eq!(res.final_answer, "answer-b");
+        assert_eq!(res.report.disagreements, vec!["a was weaker"]);
     }
 }

@@ -51,6 +51,18 @@ fn extract_json_object(text: &str) -> Option<String> {
     (end > start).then(|| text[start..=end].to_string())
 }
 
+/// Build the judge's instruction (user content): pick the single best answer.
+pub fn judge_prompt(question: &str, labeled_answers: &str) -> String {
+    format!(
+        "You are an impartial judge of a panel of AI models. Below is a user question and each model's answer.\n\n\
+Question:\n{question}\n\n\
+Model answers:\n{labeled_answers}\n\n\
+Score each answer for correctness and clarity, then SELECT THE SINGLE BEST answer (verbatim) as the final answer. Also note where models agreed and disagreed.\n\
+Respond with ONLY a JSON object (no prose, no markdown fences) in exactly this shape:\n\
+{{\"final_answer\": \"<the best answer, verbatim>\", \"agreements\": [\"<point of agreement>\"], \"disagreements\": [\"<point of disagreement>\"]}}"
+    )
+}
+
 /// Build the chairman's synthesis instruction (user content).
 pub fn synthesis_prompt(question: &str, labeled_answers: &str) -> String {
     format!(
