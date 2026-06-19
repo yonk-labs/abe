@@ -31,6 +31,8 @@ struct ValidateReq {
     #[serde(default)]
     reviewer: Option<String>,
     #[serde(default)]
+    prior_reasoning: Option<String>,
+    #[serde(default)]
     context: Option<String>,
 }
 
@@ -104,6 +106,7 @@ async fn validate_handler(
         &s.cfg,
         &req.statement,
         req.reviewer.as_deref(),
+        req.prior_reasoning.as_deref(),
         req.context.as_deref(),
     )
     .await
@@ -207,7 +210,8 @@ function renderDebate(r){
 }
 function renderValidate(r){
   if(r.error){$('#out').innerHTML='<div class="card">error: '+esc(r.error)+'</div>';return;}
-  $('#out').innerHTML='<div class="card"><div class="muted">reviewer: '+esc(r.reviewer)+'</div><pre>'+esc(r.take)+'</pre></div>';
+  const note=r.note?'<div class="muted">note: '+esc(r.note)+'</div>':'';
+  $('#out').innerHTML='<div class="card"><div class="muted">reviewer: '+esc(r.reviewer)+'</div>'+note+'<pre>'+esc(r.take)+'</pre></div>';
 }
 $('#run').addEventListener('click',run);
 </script>

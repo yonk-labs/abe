@@ -88,6 +88,10 @@ pub struct ValidateArgs {
     /// Reviewer model name (default: validate.reviewers[0], else first model).
     #[arg(short, long)]
     pub reviewer: Option<String>,
+    /// Your current take, so the reviewer gives a counter-perspective on your
+    /// reasoning rather than judging the statement cold.
+    #[arg(long)]
+    pub prior_reasoning: Option<String>,
     /// Comma-separated files to include as context (secret-scanned first).
     #[arg(long)]
     pub files: Option<String>,
@@ -106,6 +110,7 @@ pub async fn run_validate_cmd(args: ValidateArgs) -> anyhow::Result<()> {
         &cfg,
         &args.statement,
         args.reviewer.as_deref(),
+        args.prior_reasoning.as_deref(),
         context.as_deref(),
     )
     .await?;
@@ -114,6 +119,9 @@ pub async fn run_validate_cmd(args: ValidateArgs) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&res)?);
     } else {
         println!("\n=== {}'s take ===\n\n{}\n", res.reviewer, res.take);
+        if let Some(note) = &res.note {
+            println!("note: {note}\n");
+        }
     }
     Ok(())
 }

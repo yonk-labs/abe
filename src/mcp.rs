@@ -34,6 +34,11 @@ pub struct ValidateParams {
     /// Reviewer model name (defaults to validate.reviewers[0], else first model).
     #[serde(default)]
     pub reviewer: Option<String>,
+    /// Your current take / reasoning as the host model. Supply it to get a true
+    /// second opinion — the reviewer will say where you're right or wrong rather
+    /// than judging the statement in a vacuum.
+    #[serde(default)]
+    pub prior_reasoning: Option<String>,
     /// Optional extra context to include in the review.
     #[serde(default)]
     pub context: Option<String>,
@@ -86,6 +91,7 @@ impl DebatorServer {
             &cfg,
             &p.statement,
             p.reviewer.as_deref(),
+            p.prior_reasoning.as_deref(),
             p.context.as_deref(),
         )
         .await?;
