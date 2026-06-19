@@ -14,5 +14,6 @@ async fn main() -> anyhow::Result<()> {
     match app.command {
         cli::Command::Debate(args) => cli::run_debate_cmd(args).await,
         cli::Command::Validate(args) => cli::run_validate_cmd(args).await,
+        cli::Command::Models(args) => cli::run_models_cmd(args).await,
     }
 }

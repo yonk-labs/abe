@@ -1,6 +1,6 @@
 //! Command-line interface (clap) and output rendering.
 
-use crate::config::{Config, Protocol};
+use crate::config::{CliKind, Config, ModelKind, Protocol};
 use crate::debate::{run_debate, DebateResult};
 use crate::provider::{build_provider, Provider};
 use crate::validate::run_validate;
@@ -25,6 +25,8 @@ pub enum Command {
     Debate(DebateArgs),
     /// Get one model's independent second opinion on a statement/decision.
     Validate(ValidateArgs),
+    /// List configured models and check basic reachability (CLI on PATH, keys set).
+    Models(ModelsArgs),
 }
 
 #[derive(Args)]
@@ -161,6 +163,63 @@ fn gather_context(files: Option<&str>, allow_secrets: bool) -> anyhow::Result<Op
     Ok(Some(buf))
 }
 
+#[derive(Args)]
+pub struct ModelsArgs {
+    /// Config path (default: ./llm-debator.yaml then ~/.config/llm-debator/config.yaml).
+    #[arg(short, long)]
+    pub config: Option<String>,
+}
+
+pub async fn run_models_cmd(args: ModelsArgs) -> anyhow::Result<()> {
+    let cfg = load_config(args.config.as_deref())?;
+    println!("{} model(s):", cfg.models.len());
+    for m in &cfg.models {
+        let status = match m.kind {
+            ModelKind::Cli => match m.cli {
+                Some(c) => {
+                    let bin = cli_bin(c);
+                    if which(bin) {
+                        format!("\u{2713} {bin} on PATH")
+                    } else {
+                        format!("\u{2717} {bin} NOT on PATH")
+                    }
+                }
+                None => "\u{2717} no cli specified".to_string(),
+            },
+            _ => match &m.api_key_env {
+                Some(env) if std::env::var(env).is_ok() => format!("\u{2713} {env} set"),
+                Some(env) => format!("\u{2717} {env} not set"),
+                None => "(no api_key_env \u{2014} ok for local/no-auth)".to_string(),
+            },
+        };
+        println!("  {:14} {:24} {}", m.name, kind_label(m), status);
+    }
+    Ok(())
+}
+
+fn cli_bin(c: CliKind) -> &'static str {
+    match c {
+        CliKind::Codex => "codex",
+        CliKind::Claude => "claude",
+        CliKind::Opencode => "opencode",
+    }
+}
+
+fn kind_label(m: &crate::config::ModelCfg) -> String {
+    match m.kind {
+        ModelKind::Cli => format!("cli:{}", m.cli.map(cli_bin).unwrap_or("?")),
+        ModelKind::Openai => format!("openai {}", m.model.as_deref().unwrap_or("?")),
+        ModelKind::Anthropic => format!("anthropic {}", m.model.as_deref().unwrap_or("?")),
+        ModelKind::OpenaiCompatible => format!("oai-compat {}", m.model.as_deref().unwrap_or("?")),
+    }
+}
+
+fn which(bin: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
+        .unwrap_or(false)
+}
+
 fn parse_protocol(s: &str) -> anyhow::Result<Protocol> {
     match s.to_lowercase().as_str() {
         "synthesis" => Ok(Protocol::Synthesis),
@@ -232,5 +291,11 @@ mod tests {
         assert!(matches!(parse_protocol("Majority").unwrap(), Protocol::Majority));
         assert!(matches!(parse_protocol("judge").unwrap(), Protocol::Judge));
         assert!(parse_protocol("nope").is_err());
+    }
+
+    #[test]
+    fn which_finds_real_binaries_only() {
+        assert!(which("sh"));
+        assert!(!which("definitely-not-a-real-binary-xyzzy"));
     }
 }
