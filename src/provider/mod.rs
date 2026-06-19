@@ -65,6 +65,31 @@ pub trait Provider: Send + Sync {
     async fn complete(&self, prompt: &Prompt) -> Result<Answer, ProviderError>;
 }
 
+/// Build a live provider from config: CLI subprocess or HTTP (genai).
+pub fn build_provider(
+    cfg: &crate::config::ModelCfg,
+    defaults: &crate::config::Defaults,
+) -> anyhow::Result<Box<dyn Provider>> {
+    use anyhow::Context;
+    use crate::config::ModelKind;
+    match cfg.kind {
+        ModelKind::Cli => {
+            let cli = cfg
+                .cli
+                .with_context(|| format!("model `{}` has kind=cli but no `cli`", cfg.name))?;
+            Ok(Box::new(cli::CliProvider::new(
+                &cfg.name,
+                cli,
+                cfg.model.clone(),
+                cfg.fast,
+                cfg.extra_args.clone(),
+                defaults.timeout_secs,
+            )))
+        }
+        _ => Ok(Box::new(http::HttpProvider::new(cfg, defaults)?)),
+    }
+}
+
 /// Deterministic provider for tests: returns scripted answers in order
 /// (repeats the last once exhausted).
 #[cfg(test)]
@@ -138,5 +163,16 @@ mod tests {
         let p = MockProvider::new("m1", ["round0", "round1"]);
         assert_eq!(p.complete(&Prompt::user("x")).await.unwrap().text, "round0");
         assert_eq!(p.complete(&Prompt::user("x")).await.unwrap().text, "round1");
+    }
+
+    #[test]
+    fn factory_builds_cli_and_http() {
+        use crate::config::Config;
+        let c = Config::from_yaml(
+            "models: [{name: cx, kind: cli, cli: codex}, {name: gpt, kind: openai, model: gpt-5.1}]",
+        )
+        .unwrap();
+        assert_eq!(build_provider(&c.models[0], &c.defaults).unwrap().name(), "cx");
+        assert_eq!(build_provider(&c.models[1], &c.defaults).unwrap().name(), "gpt");
     }
 }
