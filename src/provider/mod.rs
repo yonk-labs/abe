@@ -69,6 +69,7 @@ pub struct MockProvider {
     name: String,
     answers: Vec<String>,
     idx: std::sync::atomic::AtomicUsize,
+    log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 #[cfg(test)]
@@ -82,7 +83,13 @@ impl MockProvider {
             name: name.to_string(),
             answers: answers.into_iter().map(Into::into).collect(),
             idx: std::sync::atomic::AtomicUsize::new(0),
+            log: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
+    }
+
+    /// Shared handle to the user-prompt text this provider has received, in order.
+    pub fn log_handle(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        self.log.clone()
     }
 }
 
@@ -92,8 +99,9 @@ impl Provider for MockProvider {
     fn name(&self) -> &str {
         &self.name
     }
-    async fn complete(&self, _prompt: &Prompt) -> Result<Answer, ProviderError> {
+    async fn complete(&self, prompt: &Prompt) -> Result<Answer, ProviderError> {
         use std::sync::atomic::Ordering;
+        self.log.lock().unwrap().push(prompt.user.clone());
         let i = self.idx.fetch_add(1, Ordering::SeqCst);
         let text = self
             .answers

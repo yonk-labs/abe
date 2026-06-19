@@ -244,4 +244,29 @@ mod tests {
         assert_eq!(res.final_answer, "MERGED");
         assert_eq!(res.report.agreements, vec!["both agree"]);
     }
+
+    #[tokio::test]
+    async fn one_round_feeds_others_answers_anonymized() {
+        let c = cfg(1); // rounds = 1, anonymize defaults true
+        let a = MockProvider::new("a", ["a-r0", "a-r1"]);
+        let log = a.log_handle();
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(a),
+            Box::new(MockProvider::new("b", ["b-r0", "b-r1"])),
+            Box::new(MockProvider::new("c", ["c-r0", "c-r1"])),
+        ];
+        let chair = MockProvider::new(
+            "chair",
+            [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
+        );
+        run_debate(&c, &providers, &chair, "Q").await.unwrap();
+
+        let prompts = log.lock().unwrap();
+        let round1 = &prompts[1]; // [0] = broadcast, [1] = critique
+        assert!(round1.contains("b-r0"), "should include other models' answers");
+        assert!(round1.contains("c-r0"));
+        assert!(!round1.contains("a-r0"), "should exclude its own answer");
+        assert!(round1.contains("Solution A"), "labels should be anonymized");
+        assert!(!round1.contains("### b"), "should not label by model name");
+    }
 }
