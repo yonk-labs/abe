@@ -49,6 +49,15 @@ pub async fn run_debate(
         answers: round0,
     });
 
+    // Fault tolerance: require at least `min_models` successful responses.
+    let live = latest_successful(&rounds).len() as u32;
+    if live < cfg.debate.min_models {
+        anyhow::bail!(
+            "only {live} model(s) responded successfully; need at least {} (debate.min_models)",
+            cfg.debate.min_models
+        );
+    }
+
     // Critique rounds 1..=rounds.
     for r in 1..=cfg.debate.rounds {
         let latest = latest_successful(&rounds);
@@ -363,5 +372,41 @@ mod tests {
         let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
         assert_eq!(res.final_answer, "answer-b");
         assert_eq!(res.report.disagreements, vec!["a was weaker"]);
+    }
+
+    #[tokio::test]
+    async fn aborts_below_min_models() {
+        let c = cfg(0); // min_models defaults to 2
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::new("a", ["ok"])),
+            Box::new(crate::provider::FailProvider::new("b")),
+        ];
+        let chair = MockProvider::new(
+            "chair",
+            [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
+        );
+        let res = run_debate(&c, &providers, &chair, "Q").await;
+        assert!(res.is_err(), "only 1 of 2 models succeeded → should abort");
+    }
+
+    #[tokio::test]
+    async fn drops_failed_model_and_continues() {
+        let mut c = cfg(0);
+        c.debate.min_models = 2;
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::new("a", ["ok-a"])),
+            Box::new(MockProvider::new("b", ["ok-b"])),
+            Box::new(crate::provider::FailProvider::new("c")),
+        ];
+        let chair = MockProvider::new(
+            "chair",
+            [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
+        );
+        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        assert_eq!(res.models_used.len(), 2);
+        assert!(res.models_used.contains(&"a".to_string()));
+        assert!(!res.models_used.contains(&"c".to_string()));
+        let r0 = &res.rounds[0];
+        assert!(r0.answers.iter().any(|a| a.model == "c" && a.error.is_some()));
     }
 }

@@ -90,6 +90,29 @@ pub fn build_provider(
     }
 }
 
+/// Run `f` up to `attempts` times (minimum 1) with exponential backoff between
+/// tries. Returns the first success, or the last error if all attempts fail.
+pub async fn retry_async<T, E, F, Fut>(attempts: u32, mut f: F) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let attempts = attempts.max(1);
+    let mut last: Option<E> = None;
+    for i in 0..attempts {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                last = Some(e);
+                if i + 1 < attempts {
+                    tokio::time::sleep(std::time::Duration::from_millis(50u64 << i)).await;
+                }
+            }
+        }
+    }
+    Err(last.expect("attempts >= 1 guarantees an error on failure"))
+}
+
 /// Deterministic provider for tests: returns scripted answers in order
 /// (repeats the last once exhausted).
 #[cfg(test)]
@@ -146,6 +169,35 @@ impl Provider for MockProvider {
     }
 }
 
+/// Always-failing provider for fault-tolerance tests.
+#[cfg(test)]
+pub struct FailProvider {
+    name: String,
+}
+
+#[cfg(test)]
+impl FailProvider {
+    pub fn new(name: &str) -> Self {
+        FailProvider {
+            name: name.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl Provider for FailProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    async fn complete(&self, _prompt: &Prompt) -> Result<Answer, ProviderError> {
+        Err(ProviderError::Backend {
+            name: self.name.clone(),
+            source: anyhow::anyhow!("simulated failure"),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +226,29 @@ mod tests {
         .unwrap();
         assert_eq!(build_provider(&c.models[0], &c.defaults).unwrap().name(), "cx");
         assert_eq!(build_provider(&c.models[1], &c.defaults).unwrap().name(), "gpt");
+    }
+
+    #[tokio::test]
+    async fn retry_succeeds_after_failures() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let calls = AtomicU32::new(0);
+        let r: Result<u32, &str> = retry_async(3, || {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 2 {
+                    Err("transient")
+                } else {
+                    Ok(n)
+                }
+            }
+        })
+        .await;
+        assert_eq!(r, Ok(2));
+    }
+
+    #[tokio::test]
+    async fn retry_gives_up_after_attempts() {
+        let r: Result<u32, &str> = retry_async(2, || async { Err::<u32, &str>("nope") }).await;
+        assert_eq!(r, Err("nope"));
     }
 }

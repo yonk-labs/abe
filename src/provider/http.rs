@@ -16,10 +16,11 @@ pub struct HttpProvider {
     name: String,
     model: String,
     client: Client,
+    attempts: u32,
 }
 
 impl HttpProvider {
-    pub fn new(cfg: &ModelCfg, _defaults: &Defaults) -> anyhow::Result<Self> {
+    pub fn new(cfg: &ModelCfg, defaults: &Defaults) -> anyhow::Result<Self> {
         let model = cfg
             .model
             .clone()
@@ -29,6 +30,7 @@ impl HttpProvider {
             name: cfg.name.clone(),
             model,
             client,
+            attempts: defaults.retries + 1,
         })
     }
 }
@@ -98,25 +100,24 @@ impl Provider for HttpProvider {
         let req = ChatRequest::new(msgs);
 
         let start = Instant::now();
-        let res = self
-            .client
-            .exec_chat(&self.model, req, None)
-            .await
-            .map_err(|e| ProviderError::Backend {
+        let res = crate::provider::retry_async(self.attempts, || {
+            let req = req.clone();
+            async move { self.client.exec_chat(&self.model, req, None).await }
+        })
+        .await;
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        match res {
+            Ok(r) => Ok(Answer {
+                model_name: self.name.clone(),
+                text: r.first_text().map(|s| s.to_string()).unwrap_or_default(),
+                usage: None,
+                elapsed_ms,
+            }),
+            Err(e) => Err(ProviderError::Backend {
                 name: self.name.clone(),
                 source: anyhow::anyhow!(e.to_string()),
-            })?;
-        let elapsed_ms = start.elapsed().as_millis() as u64;
-        let text = res
-            .first_text()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        Ok(Answer {
-            model_name: self.name.clone(),
-            text,
-            usage: None,
-            elapsed_ms,
-        })
+            }),
+        }
     }
 }
 
