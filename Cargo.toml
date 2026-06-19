@@ -1,8 +1,12 @@
 [package]
 name = "abe"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Multi-provider LLM debate/consensus proxy (HTTP + CLI providers)"
+license = "MIT"
+repository = "https://github.com/yonk-labs/abe"
+homepage = "https://github.com/yonk-labs/abe"
+keywords = ["llm", "debate", "consensus", "mcp", "ai"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "fs", "net"] }
