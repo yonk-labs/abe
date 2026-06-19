@@ -1,6 +1,6 @@
 //! Debate engine: broadcast, critique rounds, decision protocols.
 
-use crate::config::{Config, Protocol};
+use crate::config::{Config, Defaults, Protocol};
 use crate::provider::{build_provider, Prompt, Provider};
 use crate::report::{judge_prompt, parse_synthesis, synthesis_prompt, Report};
 use anyhow::Context;
@@ -215,6 +215,17 @@ Critique the other answers — point out any errors or points of disagreement �
     }
 }
 
+/// Minimum token budget for the chairman's reply. The chairman emits more than
+/// any single debater — a full merged answer PLUS the agreement/disagreement
+/// arrays — so the per-model budget (tuned for one answer) truncates its JSON
+/// and silently drops the report. Floor it.
+// ponytail: a floor, not a new config knob — add `chairman_max_tokens` only if someone needs to tune it.
+const CHAIRMAN_MIN_TOKENS: u32 = 2048;
+
+fn chairman_max_tokens(defaults: &Defaults) -> u32 {
+    defaults.max_tokens.max(CHAIRMAN_MIN_TOKENS)
+}
+
 /// Synthesis/judge: hand the labeled answers to the chairman model, parse its
 /// JSON into (final_answer, report). Falls back to the first answer on failure.
 async fn chairman_decide(
@@ -228,7 +239,7 @@ async fn chairman_decide(
         system: None,
         user,
         temperature: cfg.defaults.temperature,
-        max_tokens: cfg.defaults.max_tokens,
+        max_tokens: chairman_max_tokens(&cfg.defaults),
     };
     match chairman.complete(&prompt).await {
         Ok(a) => {
@@ -444,6 +455,24 @@ mod tests {
         assert!(!res.models_used.contains(&"c".to_string()));
         let r0 = &res.rounds[0];
         assert!(r0.answers.iter().any(|a| a.model == "c" && a.error.is_some()));
+    }
+
+    #[test]
+    fn chairman_gets_token_headroom() {
+        use crate::config::Defaults;
+        // A tight per-model budget must be floored for the chairman, which must
+        // emit a full merged answer PLUS both report arrays in one reply.
+        let d = Defaults {
+            max_tokens: 512,
+            ..Defaults::default()
+        };
+        assert!(chairman_max_tokens(&d) >= 2048, "tight budget should be floored");
+        // A generous budget is respected, never lowered.
+        let d = Defaults {
+            max_tokens: 4096,
+            ..Defaults::default()
+        };
+        assert_eq!(chairman_max_tokens(&d), 4096);
     }
 
     #[test]
