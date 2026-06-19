@@ -1,0 +1,18 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Skill output (per skill-output-hygiene; re-run skills to regenerate)
+skill-output/
+
+# Session memory buffer
+.remember/
+
+# Secrets / env
+.env
+.env.*
+*.pem
+*.key
+
+# Logs / scratch
+*.log
