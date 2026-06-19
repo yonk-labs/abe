@@ -10,25 +10,35 @@ permissions:
   packages: write
 
 jobs:
-  binaries:
-    name: ${{ matrix.asset }}
-    strategy:
-      matrix:
-        include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, asset: abe-linux-x86_64 }
-          - { os: macos-13,      target: x86_64-apple-darwin,      asset: abe-macos-x86_64 }
-          - { os: macos-14,      target: aarch64-apple-darwin,     asset: abe-macos-arm64 }
-    runs-on: ${{ matrix.os }}
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: cp target/release/abe abe-linux-x86_64
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: abe-linux-x86_64
+
+  macos:
+    # Apple Silicon runner builds BOTH mac targets (x86_64 is cross-compiled),
+    # so we don't depend on scarce macos-13 (Intel) runners.
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
-      - run: cargo build --release --target ${{ matrix.target }}
-      - run: cp target/${{ matrix.target }}/release/abe ${{ matrix.asset }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: cargo build --release --target aarch64-apple-darwin
+      - run: cargo build --release --target x86_64-apple-darwin
+      - run: cp target/aarch64-apple-darwin/release/abe abe-macos-arm64
+      - run: cp target/x86_64-apple-darwin/release/abe abe-macos-x86_64
       - uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.asset }}
+          files: |
+            abe-macos-arm64
+            abe-macos-x86_64
 
   docker:
     runs-on: ubuntu-latest
