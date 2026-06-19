@@ -3,6 +3,7 @@
 use crate::config::{Config, Protocol};
 use crate::debate::{run_debate, DebateResult};
 use crate::provider::{build_provider, Provider};
+use crate::validate::run_validate;
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
@@ -22,6 +23,8 @@ pub struct Cli {
 pub enum Command {
     /// Broadcast a prompt to all models, debate, return a synthesized answer.
     Debate(DebateArgs),
+    /// Get one model's independent second opinion on a statement/decision.
+    Validate(ValidateArgs),
 }
 
 #[derive(Args)]
@@ -83,6 +86,79 @@ pub async fn run_debate_cmd(args: DebateArgs) -> anyhow::Result<()> {
         print_pretty(&result);
     }
     Ok(())
+}
+
+#[derive(Args)]
+pub struct ValidateArgs {
+    /// The statement / decision / answer to validate.
+    pub statement: String,
+    /// Config path (default: ./llm-debator.yaml then ~/.config/llm-debator/config.yaml).
+    #[arg(short, long)]
+    pub config: Option<String>,
+    /// Reviewer model name (default: validate.reviewers[0], else first model).
+    #[arg(short, long)]
+    pub reviewer: Option<String>,
+    /// Comma-separated files to include as context (secret-scanned first).
+    #[arg(long)]
+    pub files: Option<String>,
+    /// Proceed even if a context file looks risky or contains secrets.
+    #[arg(long)]
+    pub allow_secrets: bool,
+    /// Emit JSON instead of pretty text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+pub async fn run_validate_cmd(args: ValidateArgs) -> anyhow::Result<()> {
+    let cfg = load_config(args.config.as_deref())?;
+
+    let reviewer_name = args
+        .reviewer
+        .clone()
+        .or_else(|| cfg.validate.reviewers.first().cloned())
+        .or_else(|| cfg.models.first().map(|m| m.name.clone()))
+        .context("no reviewer configured and no models defined")?;
+    let rcfg = cfg
+        .models
+        .iter()
+        .find(|m| m.name == reviewer_name)
+        .with_context(|| format!("reviewer `{reviewer_name}` is not a defined model"))?;
+    let reviewer = build_provider(rcfg, &cfg.defaults)?;
+
+    let context = gather_context(args.files.as_deref(), args.allow_secrets)?;
+    let res = run_validate(reviewer.as_ref(), &args.statement, context.as_deref()).await?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&res)?);
+    } else {
+        println!("\n=== {}'s take ===\n\n{}\n", res.reviewer, res.take);
+    }
+    Ok(())
+}
+
+/// Read --files into a single context blob, secret-scanning each first.
+fn gather_context(files: Option<&str>, allow_secrets: bool) -> anyhow::Result<Option<String>> {
+    let Some(files) = files else {
+        return Ok(None);
+    };
+    let mut buf = String::new();
+    for path in files.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if crate::safety::risky_filename(path) && !allow_secrets {
+            anyhow::bail!("refusing risky filename `{path}` (pass --allow-secrets to override)");
+        }
+        let content =
+            std::fs::read_to_string(path).with_context(|| format!("reading context file {path}"))?;
+        let hits = crate::safety::scan_secrets(&content);
+        if !hits.is_empty() && !allow_secrets {
+            anyhow::bail!(
+                "possible secret(s) in `{path}`: {} match(es), e.g. {} \u{2014} pass --allow-secrets to override",
+                hits.len(),
+                hits[0]
+            );
+        }
+        buf.push_str(&format!("\n--- {path} ---\n{content}\n"));
+    }
+    Ok(Some(buf))
 }
 
 fn parse_protocol(s: &str) -> anyhow::Result<Protocol> {
