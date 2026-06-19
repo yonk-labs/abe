@@ -1,0 +1,18 @@
+# Two local OpenAI-compatible endpoints (vLLM-style, no auth). Exercises the
+# genai HTTP provider path with custom base_url.
+defaults:
+  timeout_secs: 180
+  max_tokens: 512
+
+models:
+  - { name: gemma, kind: openai-compatible, model: "cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit", base_url: "http://192.168.1.133:8000/v1" }
+  - { name: qwen,  kind: openai-compatible, model: "Intel/Qwen3-Coder-Next-int4-AutoRound", base_url: "http://192.168.1.193:8000/v1" }
+
+debate:
+  rounds: 0
+  protocol: synthesis
+  chairman: gemma
+  anonymize: true
+
+validate:
+  reviewers: [qwen]
