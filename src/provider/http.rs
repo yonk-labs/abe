@@ -10,13 +10,14 @@ use genai::adapter::AdapterKind;
 use genai::chat::{ChatMessage, ChatOptions, ChatRequest};
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, ModelIden, ServiceTarget};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub struct HttpProvider {
     name: String,
     model: String,
     client: Client,
     attempts: u32,
+    timeout_secs: u64,
 }
 
 impl HttpProvider {
@@ -31,6 +32,7 @@ impl HttpProvider {
             model,
             client,
             attempts: defaults.retries + 1,
+            timeout_secs: defaults.timeout_secs,
         })
     }
 }
@@ -102,14 +104,27 @@ impl Provider for HttpProvider {
         let max_tokens = prompt.max_tokens;
 
         let start = Instant::now();
-        let res = crate::provider::retry_async(self.attempts, || {
+        // Bound the whole retry loop: genai/reqwest has no default request
+        // timeout, so without this a stalled endpoint hangs the debate forever
+        // (retry_async only retries on *error*, never on a hang). Mirrors the
+        // CLI provider's per-call timeout so `timeout_secs` means something for
+        // HTTP providers too.
+        let call = crate::provider::retry_async(self.attempts, || {
             let req = req.clone();
             let opts = ChatOptions::default()
                 .with_temperature(temperature)
                 .with_max_tokens(max_tokens);
             async move { self.client.exec_chat(&self.model, req, Some(&opts)).await }
-        })
-        .await;
+        });
+        let res = match tokio::time::timeout(Duration::from_secs(self.timeout_secs), call).await {
+            Ok(r) => r,
+            Err(_) => {
+                return Err(ProviderError::Timeout {
+                    name: self.name.clone(),
+                    ms: self.timeout_secs * 1000,
+                })
+            }
+        };
         let elapsed_ms = start.elapsed().as_millis() as u64;
         match res {
             Ok(r) => Ok(Answer {

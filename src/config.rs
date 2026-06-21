@@ -107,6 +107,13 @@ pub struct DebateCfg {
     pub anonymize: bool,
     #[serde(default = "d_min_models")]
     pub min_models: u32,
+    /// Overall wall-clock budget (seconds) for the whole debate. When set and
+    /// exceeded, remaining critique rounds are skipped and the debate proceeds
+    /// straight to the decision step with the answers gathered so far. None = no
+    /// overall cap (per-model `timeout_secs` still applies). Use it to stay under
+    /// a caller's tool-call timeout (e.g. an MCP client).
+    #[serde(default)]
+    pub max_secs: Option<u64>,
 }
 
 impl Default for DebateCfg {
@@ -117,6 +124,7 @@ impl Default for DebateCfg {
             chairman: None,
             anonymize: true,
             min_models: d_min_models(),
+            max_secs: None,
         }
     }
 }
