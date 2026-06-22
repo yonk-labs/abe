@@ -1,6 +1,8 @@
 //! Command-line interface (clap) and output rendering.
 
-use crate::config::{parse_protocol, CliKind, Config, ModelKind};
+use crate::config::{
+    apply_persona_overrides, parse_context_scope, parse_protocol, CliKind, Config, ModelKind,
+};
 use crate::debate::{debate_from_config, DebateResult};
 use crate::validate::validate_from_config;
 use anyhow::Context;
@@ -25,6 +27,8 @@ pub enum Command {
     Validate(ValidateArgs),
     /// List configured models and check basic reachability (CLI on PATH, keys set).
     Models(ModelsArgs),
+    /// List the bundled debate personas (use with `debate --persona`).
+    Personas,
     /// Run as an MCP server over stdio, exposing `debate` and `validate` tools.
     Mcp(McpArgs),
     /// Serve the web UI + JSON API (POST /api/debate, /api/validate).
@@ -46,6 +50,26 @@ pub struct DebateArgs {
     /// Override decision protocol: synthesis | majority | judge.
     #[arg(long)]
     pub protocol: Option<String>,
+    /// Comma-separated files to attach as context for the debate (secret-scanned
+    /// first). Which rounds see them is governed by --context-scope.
+    #[arg(long)]
+    pub files: Option<String>,
+    /// Proceed even if a context file looks risky or contains secrets.
+    #[arg(long)]
+    pub allow_secrets: bool,
+    /// Which stages see the attached files: off | first | chair-first | full
+    /// (default: config, then full).
+    #[arg(long)]
+    pub context_scope: Option<String>,
+    /// Assign personas to models: `model=persona,model2=persona2` (overrides
+    /// the YAML `persona:` field). See `abe personas` for the available names.
+    #[arg(long)]
+    pub persona: Option<String>,
+    /// If the attached files exceed context_max_tokens, summarize them to fit
+    /// with the `lede` tool (fast, extractive) instead of truncating. Falls back
+    /// to truncation with a warning if `lede` is not on PATH.
+    #[arg(long)]
+    pub lede: bool,
     /// Emit JSON instead of pretty text.
     #[arg(long)]
     pub json: bool,
@@ -59,6 +83,16 @@ pub async fn run_debate_cmd(args: DebateArgs) -> anyhow::Result<()> {
     if let Some(p) = &args.protocol {
         cfg.debate.protocol = parse_protocol(p)?;
     }
+    if let Some(cs) = &args.context_scope {
+        cfg.debate.context_scope = parse_context_scope(cs)?;
+    }
+    if let Some(p) = &args.persona {
+        apply_persona_overrides(&mut cfg, p)?;
+    }
+    let mut context = gather_context(args.files.as_deref(), args.allow_secrets)?;
+    if args.lede {
+        context = maybe_lede(context, cfg.debate.context_max_tokens);
+    }
 
     eprintln!(
         "[abe] {} models \u{b7} {} round(s) \u{b7} {} \u{b7} ~{} model calls",
@@ -68,7 +102,7 @@ pub async fn run_debate_cmd(args: DebateArgs) -> anyhow::Result<()> {
         crate::debate::estimate_calls(cfg.models.len(), cfg.debate.rounds, cfg.debate.protocol),
     );
 
-    let result = debate_from_config(&cfg, &args.prompt).await?;
+    let result = debate_from_config(&cfg, &args.prompt, context.as_deref()).await?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -151,6 +185,58 @@ fn gather_context(files: Option<&str>, allow_secrets: bool) -> anyhow::Result<Op
     Ok(Some(buf))
 }
 
+/// When `--lede` is set and the gathered context exceeds the token budget,
+/// summarize it with the external `lede` tool to fit. Best-effort: if `lede`
+/// is missing or fails, warn and return the context unchanged so the engine's
+/// truncation backstop takes over. Under budget (or no files) is a no-op.
+fn maybe_lede(context: Option<String>, max_tokens: u32) -> Option<String> {
+    let c = context?;
+    if crate::debate::est_tokens(&c) <= max_tokens as usize {
+        return Some(c);
+    }
+    match run_lede(&c, max_tokens as usize * 4) {
+        Ok(summary) => {
+            eprintln!(
+                "[abe] lede compressed context ~{} \u{2192} ~{} tokens",
+                crate::debate::est_tokens(&c),
+                crate::debate::est_tokens(&summary)
+            );
+            Some(summary)
+        }
+        Err(e) => {
+            eprintln!("warning: --lede unavailable ({e}); falling back to truncation");
+            Some(c)
+        }
+    }
+}
+
+/// Pipe `text` through `lede --max-chars N` (stdin → stdout) for fast extractive
+/// summarization. lede drains all stdin before emitting its (small) summary, so
+/// a single write-then-read can't deadlock for any realistic document size.
+// ponytail: std::process is fine — lede is a sub-5ms one-shot; no async needed.
+fn run_lede(text: &str, max_chars: usize) -> anyhow::Result<String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("lede")
+        .args(["--max-chars", &max_chars.to_string()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawning `lede` (is it installed and on PATH?)")?;
+    child
+        .stdin
+        .take()
+        .expect("stdin was piped")
+        .write_all(text.as_bytes())
+        .context("writing to lede stdin")?;
+    let out = child.wait_with_output().context("waiting for lede")?;
+    if !out.status.success() {
+        anyhow::bail!("lede exited with {}: {}", out.status, String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 #[derive(Args)]
 pub struct ModelsArgs {
     /// Config path (default: ./abe.yaml then ~/.config/abe/config.yaml).
@@ -204,6 +290,23 @@ pub async fn run_models_cmd(args: ModelsArgs) -> anyhow::Result<()> {
         println!("  {:14} {:24} {}", m.name, kind_label(m), status);
     }
     Ok(())
+}
+
+pub fn run_personas_cmd() {
+    let names = crate::persona::names();
+    println!(
+        "{} bundled personas \u{2014} assign with `debate --persona model=NAME` or the YAML `persona:` field:\n",
+        names.len()
+    );
+    for (name, system) in crate::persona::PERSONAS {
+        let gist = crate::persona::gist(system);
+        let gist = if gist.chars().count() > 96 {
+            format!("{}\u{2026}", gist.chars().take(95).collect::<String>())
+        } else {
+            gist.to_string()
+        };
+        println!("  {name:22} {gist}");
+    }
 }
 
 fn cli_bin(c: CliKind) -> &'static str {
