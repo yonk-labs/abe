@@ -212,6 +212,11 @@ Set it durably in YAML per model (`persona: the-challenger`), or override per ca
 | `the-community-builder` | accessibility & onboarding — no gatekeeping, a concrete next step |
 | `the-yonk` | 20-yr OSS DB/AI vet — production scars, right-sizing over hype |
 
+### Adding personas
+
+- **Your own, ad hoc** — no rebuild: pass a **file path** or **inline text** to `--persona` / `persona:` (see the three reference kinds above).
+- **A new bundled voice** (referenceable by short name, shipped in the binary) — drop a `personas/<name>.md` file and register it in `src/persona.rs`. Steps and the house style are in [`personas/README.md`](personas/README.md).
+
 ## Decision protocols
 
 - **synthesis** — a chairman model merges all answers into one, with the agree/disagree report.
