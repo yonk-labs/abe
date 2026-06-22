@@ -23,6 +23,15 @@ struct DebateReq {
     rounds: Option<u32>,
     #[serde(default)]
     protocol: Option<String>,
+    /// Reference material (file contents) to attach to the debate.
+    #[serde(default)]
+    context: Option<String>,
+    /// Which stages see the context: off | first | chair-first | full.
+    #[serde(default)]
+    context_scope: Option<String>,
+    /// Assign personas to models: "model=persona,model2=persona2".
+    #[serde(default)]
+    personas: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -90,7 +99,18 @@ async fn debate_handler(
             Err(e) => return err_json(e),
         }
     }
-    match crate::debate::debate_from_config(&cfg, &req.prompt).await {
+    if let Some(cs) = &req.context_scope {
+        match crate::config::parse_context_scope(cs) {
+            Ok(s) => cfg.debate.context_scope = s,
+            Err(e) => return err_json(e),
+        }
+    }
+    if let Some(spec) = &req.personas {
+        if let Err(e) = crate::config::apply_persona_overrides(&mut cfg, spec) {
+            return err_json(e);
+        }
+    }
+    match crate::debate::debate_from_config(&cfg, &req.prompt, req.context.as_deref()).await {
         Ok(res) => Json(serde_json::to_value(res).unwrap_or_else(|e| {
             serde_json::json!({ "error": e.to_string() })
         })),
@@ -168,6 +188,16 @@ h3{margin:.8rem 0 .3rem}
       <option>synthesis</option><option>majority</option><option>judge</option>
     </select>
   </label>
+  <label>Context to
+    <select id="scope">
+      <option value="">(config)</option>
+      <option value="full">full</option><option value="first">first</option>
+      <option value="chair-first">chair-first</option><option value="off">off</option>
+    </select>
+  </label>
+</div>
+<div id="debateCtx">
+  <textarea id="context" placeholder="Optional reference material (design doc, README, architecture notes) to attach to the debate..." style="min-height:60px"></textarea>
 </div>
 <div class="row">
   <button class="primary" id="run">Run</button>
@@ -178,7 +208,7 @@ h3{margin:.8rem 0 .3rem}
 const $=s=>document.querySelector(s);
 const mode=()=>document.querySelector('input[name=mode]:checked').value;
 const esc=s=>(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-function toggle(){$('#debateOpts').style.display=mode()==='debate'?'flex':'none';}
+function toggle(){const d=mode()==='debate';$('#debateOpts').style.display=d?'flex':'none';$('#debateCtx').style.display=d?'block':'none';}
 document.querySelectorAll('input[name=mode]').forEach(r=>r.addEventListener('change',toggle));toggle();
 async function run(){
   const text=$('#input').value.trim();if(!text)return;
@@ -188,6 +218,8 @@ async function run(){
       const body={prompt:text};
       const r=$('#rounds').value;if(r!=='')body.rounds=parseInt(r,10);
       const p=$('#protocol').value;if(p)body.protocol=p;
+      const cs=$('#scope').value;if(cs)body.context_scope=cs;
+      const ctx=$('#context').value.trim();if(ctx)body.context=ctx;
       renderDebate(await post('/api/debate',body));
     }else{
       renderValidate(await post('/api/validate',{statement:text}));

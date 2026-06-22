@@ -50,6 +50,7 @@ fn d_ctx_kb() -> u64 { 50 }
 fn d_rounds() -> u32 { 2 }
 fn d_true() -> bool { true }
 fn d_min_models() -> u32 { 2 }
+fn d_ctx_tokens() -> u32 { 12000 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -77,6 +78,34 @@ pub enum Protocol {
     Judge,
 }
 
+/// Which debate stages see the attached file context. Off = none; First = the
+/// round-0 broadcast only; ChairFirst = round 0 + the chairman's synthesis/judge;
+/// Full = round 0, every critique round, and the chairman.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ContextScope {
+    Off,
+    First,
+    ChairFirst,
+    #[default]
+    Full,
+}
+
+impl ContextScope {
+    /// Does the round-0 broadcast receive the context?
+    pub fn round0(self) -> bool {
+        !matches!(self, ContextScope::Off)
+    }
+    /// Do critique rounds receive the context?
+    pub fn critique(self) -> bool {
+        matches!(self, ContextScope::Full)
+    }
+    /// Does the chairman's synthesis/judge prompt receive the context?
+    pub fn chairman(self) -> bool {
+        matches!(self, ContextScope::ChairFirst | ContextScope::Full)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelCfg {
     pub name: String,
@@ -93,6 +122,10 @@ pub struct ModelCfg {
     pub fast: bool,
     #[serde(default)]
     pub extra_args: Vec<String>,
+    /// Bundled persona this model adopts in debates (see `abe personas`).
+    /// None = no persona. Overridable per call with `debate --persona`.
+    #[serde(default)]
+    pub persona: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -114,6 +147,15 @@ pub struct DebateCfg {
     /// a caller's tool-call timeout (e.g. an MCP client).
     #[serde(default)]
     pub max_secs: Option<u64>,
+    /// Which debate stages see attached file context (off|first|chair-first|full).
+    /// Default full. Inert when no files are attached.
+    #[serde(default)]
+    pub context_scope: ContextScope,
+    /// Token budget (estimated, ~4 chars/token) for attached file context.
+    /// Over this, the context is truncated and a warning is emitted. Default
+    /// 12000. `debate --lede` summarizes oversized files to fit instead.
+    #[serde(default = "d_ctx_tokens")]
+    pub context_max_tokens: u32,
 }
 
 impl Default for DebateCfg {
@@ -125,6 +167,8 @@ impl Default for DebateCfg {
             anonymize: true,
             min_models: d_min_models(),
             max_secs: None,
+            context_scope: ContextScope::default(),
+            context_max_tokens: d_ctx_tokens(),
         }
     }
 }
@@ -168,6 +212,10 @@ impl Config {
                         anyhow::bail!("model `{}` requires a `model` field", m.name);
                     }
                 }
+            }
+            if let Some(p) = &m.persona {
+                crate::persona::resolve(p)
+                    .with_context(|| format!("model `{}` persona", m.name))?;
             }
         }
         let names: HashSet<&str> = self.models.iter().map(|m| m.name.as_str()).collect();
@@ -231,6 +279,41 @@ pub fn parse_protocol(s: &str) -> anyhow::Result<Protocol> {
     }
 }
 
+/// Parse a context-scope value (case-insensitive). Accepts both the readable
+/// names and shorthands: off|0, first|1, chair-first|chair-1, full. Shared by
+/// CLI, MCP, and HTTP overrides; config YAML uses the readable names.
+pub fn parse_context_scope(s: &str) -> anyhow::Result<ContextScope> {
+    match s.to_lowercase().as_str() {
+        "off" | "0" => Ok(ContextScope::Off),
+        "first" | "1" => Ok(ContextScope::First),
+        "chair-first" | "chair-1" => Ok(ContextScope::ChairFirst),
+        "full" => Ok(ContextScope::Full),
+        other => anyhow::bail!("unknown context scope `{other}` (expected off|first|chair-first|full)"),
+    }
+}
+
+/// Apply a `model=persona,model2=persona2` override spec onto the config's
+/// models. Each pair sets that model's persona, overriding any YAML value.
+/// Errors on a malformed entry, an unknown model, or an unknown persona.
+/// Shared by the CLI `--persona` flag and the MCP/HTTP `personas` field.
+pub fn apply_persona_overrides(cfg: &mut Config, spec: &str) -> anyhow::Result<()> {
+    for pair in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (model, persona) = pair
+            .split_once('=')
+            .map(|(m, p)| (m.trim(), p.trim()))
+            .with_context(|| format!("bad --persona entry `{pair}` (expected model=persona)"))?;
+        crate::persona::resolve(persona)
+            .with_context(|| format!("--persona {model}={persona}"))?;
+        let m = cfg
+            .models
+            .iter_mut()
+            .find(|m| m.name == model)
+            .with_context(|| format!("unknown model `{model}` in --persona"))?;
+        m.persona = Some(persona.to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +355,22 @@ validate: { reviewers: [codex-cli] }
     }
 
     #[test]
+    fn accepts_known_persona_rejects_unknown() {
+        let ok = Config::from_yaml(
+            "models: [{name: a, kind: cli, cli: codex, persona: the-challenger}]",
+        )
+        .unwrap();
+        assert_eq!(ok.models[0].persona.as_deref(), Some("the-challenger"));
+        ok.validate().unwrap();
+
+        let bad = Config::from_yaml(
+            "models: [{name: a, kind: cli, cli: codex, persona: not-a-persona}]",
+        )
+        .unwrap();
+        assert!(bad.validate().is_err(), "unknown persona must fail validation");
+    }
+
+    #[test]
     fn rejects_unknown_chairman() {
         let c = Config::from_yaml(
             "models: [{name: a, kind: cli, cli: codex}]\ndebate: {chairman: ghost}",
@@ -307,5 +406,77 @@ validate: { reviewers: [codex-cli] }
         assert!(matches!(parse_protocol("MAJORITY").unwrap(), Protocol::Majority));
         assert!(matches!(parse_protocol("judge").unwrap(), Protocol::Judge));
         assert!(parse_protocol("bogus").is_err());
+    }
+
+    #[test]
+    fn context_scope_defaults_to_full() {
+        let c = Config::from_yaml("models: [{name: a, kind: cli, cli: codex}]").unwrap();
+        assert!(matches!(c.debate.context_scope, ContextScope::Full));
+    }
+
+    #[test]
+    fn context_max_tokens_defaults_and_overrides() {
+        let c = Config::from_yaml("models: [{name: a, kind: cli, cli: codex}]").unwrap();
+        assert_eq!(c.debate.context_max_tokens, 12000);
+        let c = Config::from_yaml(
+            "models: [{name: a, kind: cli, cli: codex}]\ndebate: {context_max_tokens: 500}",
+        )
+        .unwrap();
+        assert_eq!(c.debate.context_max_tokens, 500);
+    }
+
+    #[test]
+    fn context_scope_parses_from_yaml() {
+        let c = Config::from_yaml(
+            "models: [{name: a, kind: cli, cli: codex}]\ndebate: {context_scope: chair-first}",
+        )
+        .unwrap();
+        assert!(matches!(c.debate.context_scope, ContextScope::ChairFirst));
+    }
+
+    #[test]
+    fn context_scope_stage_gates() {
+        // off: nothing gets the doc.
+        assert!(!ContextScope::Off.round0());
+        assert!(!ContextScope::Off.critique());
+        assert!(!ContextScope::Off.chairman());
+        // first: round 0 only.
+        assert!(ContextScope::First.round0());
+        assert!(!ContextScope::First.critique());
+        assert!(!ContextScope::First.chairman());
+        // chair-first: round 0 + chairman, not critique.
+        assert!(ContextScope::ChairFirst.round0());
+        assert!(!ContextScope::ChairFirst.critique());
+        assert!(ContextScope::ChairFirst.chairman());
+        // full: everyone, every stage.
+        assert!(ContextScope::Full.round0());
+        assert!(ContextScope::Full.critique());
+        assert!(ContextScope::Full.chairman());
+    }
+
+    #[test]
+    fn apply_persona_overrides_sets_validates_and_errors() {
+        let yaml = "models: [{name: a, kind: cli, cli: codex}, {name: b, kind: cli, cli: claude}]";
+        let mut c = Config::from_yaml(yaml).unwrap();
+        apply_persona_overrides(&mut c, "a=the-challenger, b=the-engineer").unwrap();
+        assert_eq!(c.models[0].persona.as_deref(), Some("the-challenger"));
+        assert_eq!(c.models[1].persona.as_deref(), Some("the-engineer"));
+
+        let mut c = Config::from_yaml(yaml).unwrap();
+        assert!(apply_persona_overrides(&mut c, "a=not-real").is_err(), "unknown persona");
+        assert!(apply_persona_overrides(&mut c, "ghost=the-yonk").is_err(), "unknown model");
+        assert!(apply_persona_overrides(&mut c, "a").is_err(), "missing = separator");
+    }
+
+    #[test]
+    fn parse_context_scope_names_and_shorthands() {
+        assert!(matches!(parse_context_scope("off").unwrap(), ContextScope::Off));
+        assert!(matches!(parse_context_scope("0").unwrap(), ContextScope::Off));
+        assert!(matches!(parse_context_scope("first").unwrap(), ContextScope::First));
+        assert!(matches!(parse_context_scope("1").unwrap(), ContextScope::First));
+        assert!(matches!(parse_context_scope("chair-first").unwrap(), ContextScope::ChairFirst));
+        assert!(matches!(parse_context_scope("chair-1").unwrap(), ContextScope::ChairFirst));
+        assert!(matches!(parse_context_scope("FULL").unwrap(), ContextScope::Full));
+        assert!(parse_context_scope("bogus").is_err());
     }
 }

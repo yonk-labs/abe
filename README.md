@@ -63,6 +63,8 @@ Reload (`/reload-plugins` or restart Claude Code). You get the `abe` MCP tools (
 /abe:validate We should rewrite this service in Rust.
 ```
 
+The `debate` MCP tool also accepts `context` (attach a doc — pass its contents), `context_scope`, and `personas` (`"model=persona,…"`), so Claude can ground a debate in a file you're discussing or run it as a panel of [personas](#personas). The `/abe:debate` command is wired to use them when your request calls for it.
+
 **Prerequisites recap:** `abe` on your `PATH` + a config (`abe init` writes `~/.config/abe/config.yaml`). Without both, the MCP server can't start.
 
 ### With Codex or other MCP clients
@@ -96,9 +98,16 @@ abe serve                      # local only
 abe serve --host 0.0.0.0       # expose on your LAN (UI is UNAUTHENTICATED — trusted networks only)
 ```
 
-Add `--json` to `debate`/`validate` for machine-readable output. `debate` flags: `--rounds N`, `--protocol synthesis|majority|judge`.
+Add `--json` to `debate`/`validate` for machine-readable output. Core `debate` flags: `--rounds N`, `--protocol synthesis|majority|judge`. Two bigger capabilities have their own sections below: **[attaching files](#attaching-files-context)** (`--files`, `--context-scope`, `--lede`) and **[personas](#personas)** (`--persona`).
 
-JSON API: `POST /api/debate {prompt, rounds?, protocol?}` and `POST /api/validate {statement, reviewer?, context?}`.
+```bash
+# Attach a design doc and give two models opposing lenses
+abe debate --files DESIGN.md,README.md \
+  --persona gpt=the-challenger,claude=the-advocate \
+  "Is this architecture sound?"
+```
+
+JSON API: `POST /api/debate {prompt, rounds?, protocol?, context?, context_scope?, personas?}` and `POST /api/validate {statement, reviewer?, context?}`. (For `/api/debate` and the MCP `debate` tool, `context` is the file *contents* — the server never reads host paths.)
 
 ## Config (YAML)
 
@@ -113,7 +122,7 @@ defaults:
   max_context_kb: 50    # warn when assembled context exceeds this
 
 models:
-  - { name: gpt,    kind: openai,            model: gpt-5.5,         api_key_env: OPENAI_API_KEY }
+  - { name: gpt,    kind: openai,            model: gpt-5.5,         api_key_env: OPENAI_API_KEY, persona: the-challenger }
   - { name: claude, kind: anthropic,         model: claude-opus-4-8, api_key_env: ANTHROPIC_API_KEY }
   - { name: local,  kind: openai-compatible, model: qwen3,           base_url: "http://192.168.1.10:8000/v1" }  # no key = no auth
   - { name: codex,  kind: cli, cli: codex,  fast: true }
@@ -125,10 +134,83 @@ debate:
   chairman: gpt         # model used for synthesis/judge (defaults to first model)
   anonymize: true       # hide model identities during cross-review
   min_models: 2         # abort if fewer than this respond
+  context_scope: full   # which stages see --files: off | first | chair-first | full
+  context_max_tokens: 12000  # cap on attached --files context (est. ~4 chars/token);
+                             # over this it's truncated (or summarized, with --lede)
 
 validate:
   reviewers: [codex]    # default reviewer(s) for `abe validate`
 ```
+
+## Attaching files (context)
+
+Pass reference material — a design doc, README, architecture notes, a spec — so the models debate *your* material instead of guessing. Files are read locally, **secret-scanned**, then injected into the prompt.
+
+```bash
+# One or more files, comma-separated
+abe debate --files DESIGN.md "Does this design hold up under load?"
+abe debate --files DESIGN.md,API.md,NOTES.md "Where are the gaps?"
+```
+
+**Which rounds see the files** — `--context-scope` (default `full`, or set `debate.context_scope` in YAML):
+
+| scope | round 0 (opening) | critique rounds | chairman (synthesis) |
+|-------|:--:|:--:|:--:|
+| `off` | – | – | – |
+| `first` | ✓ | – | – |
+| `chair-first` | ✓ | – | ✓ |
+| `full` *(default)* | ✓ | ✓ | ✓ |
+
+`full` keeps the doc in front of every model the whole debate (most faithful, most tokens); dial down for big docs.
+
+**Size guard** — attached context is capped at `debate.context_max_tokens` (default `12000`, estimated at ~4 chars/token). Over the cap it's truncated with a warning. To compress instead of truncating, add **`--lede`**: it summarizes the files to fit using the fast extractive [`lede`](https://github.com/yonk-labs/lede) tool (no LLM call). If `lede` isn't on `PATH`, it warns and falls back to truncation.
+
+```bash
+abe debate --files HUGE-SPEC.md --lede "Summarize the risks in this spec."
+```
+
+**Secrets** — file *contents* are scanned for credentials before sending; a risky file aborts the run. Pass `--allow-secrets` to override.
+
+**MCP / HTTP** take the file *contents* as a `context` string (and `context_scope`) — the server never reads host paths. The agent/host reads the file and passes its text.
+
+## Personas
+
+Give each model a distinct voice/perspective so the panel argues from different angles. A model's persona becomes its **system prompt** for answering and critiquing; the chairman's synthesis stays neutral. Default is no persona.
+
+```bash
+abe personas                       # list the 12 bundled voices
+abe debate --persona gemma=the-challenger,qwen=the-engineer "Is Postgres a good default?"
+```
+
+Set it durably in YAML per model (`persona: the-challenger`), or override per call with `--persona model=name`. A persona reference can be:
+
+- a **bundled name** (table below) — run `abe personas` for the full descriptions;
+- a **file path** — `--persona gemma=./voices/grumpy-sre.md` (the file's contents become the system prompt). Drop your own persona files anywhere and point at them;
+- an **inline prompt** — any value containing whitespace is used verbatim:
+  ```bash
+  abe debate --persona 'gemma=You are a paranoid security reviewer who assumes every input is hostile.' "Review this."
+  ```
+  ```yaml
+  # …or durably, as a YAML multi-line block:
+  - { name: gemma, kind: openai-compatible, model: x, base_url: "...", persona: "You are a paranoid security reviewer." }
+  ```
+
+### Bundled voices
+
+| name | lens it argues from |
+|------|---------------------|
+| `the-challenger` | skeptical performance expert — "what workload? show me the methodology" |
+| `the-engineer` | mechanism-first — "what's actually happening under the hood?" |
+| `data-nerd` | numbers only — refuses adjectives without a metric, version, and hardware |
+| `the-builder` | ships it — happy path vs. the unhappy path, setup, error handling |
+| `the-strategist` | OSS strategy veteran — "that's table stakes, not optional" |
+| `the-advocate` | tech-lawyer / movement builder — sovereignty, licensing, societal stakes |
+| `the-buyer` | technical buyer — TCO, lock-in, bus factor, "what's the exit plan?" |
+| `the-ceo` | enterprise exec — ROI, platform strategy, scale in production |
+| `the-cmo` | marketing strategist — business consequence, narrative, adoption |
+| `the-founder` | builder-philosopher — data-backed, empathetic contrarian |
+| `the-community-builder` | accessibility & onboarding — no gatekeeping, a concrete next step |
+| `the-yonk` | 20-yr OSS DB/AI vet — production scars, right-sizing over hype |
 
 ## Decision protocols
 
@@ -147,7 +229,7 @@ The report is a *synthesized interpretation* — raw per-model answers are alway
 ## Safety
 
 - CLI providers run read-only (`codex -s read-only --ephemeral`, `claude --permission-mode plan`).
-- `validate --files` secret-scans file contents before sending; pass `--allow-secrets` to override.
+- `debate --files` and `validate --files` secret-scan file contents before sending; pass `--allow-secrets` to override.
 - `abe serve` binds `127.0.0.1` by default. `--host 0.0.0.0` exposes the **unauthenticated** UI on all interfaces — only do this on a trusted LAN.
 
 ## Status

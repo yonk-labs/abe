@@ -40,6 +40,7 @@ pub async fn run_debate(
     providers: &[Box<dyn Provider>],
     chairman: &dyn Provider,
     question: &str,
+    context: Option<&str>,
 ) -> anyhow::Result<DebateResult> {
     let mut warnings: Vec<String> = Vec::new();
     let mut rounds: Vec<Round> = Vec::new();
@@ -47,9 +48,40 @@ pub async fn run_debate(
     // before a caller's tool-call timeout (e.g. an MCP client) gives up on it.
     let deadline = cfg.debate.max_secs.map(|s| Instant::now() + Duration::from_secs(s));
 
-    // Round 0: broadcast the question to all models concurrently.
-    let base = base_prompt(cfg, question);
-    let round0 = broadcast(providers, &base).await;
+    // Size guard: cap attached context to context_max_tokens before it fans out
+    // to every model and round. Applies on all surfaces (CLI/MCP/HTTP); the CLI's
+    // --lede summarizes oversized files to fit ahead of this, so this truncation
+    // is the backstop when the input is still too big.
+    let context: Option<String> = context.map(|c| {
+        let (capped, cut) = cap_to_tokens(c, cfg.debate.context_max_tokens);
+        if cut {
+            warnings.push(format!(
+                "attached context ~{} tokens exceeds context_max_tokens={}; truncated to fit (raise the cap or shorten the input)",
+                est_tokens(c),
+                cfg.debate.context_max_tokens
+            ));
+        }
+        capped
+    });
+    let context = context.as_deref();
+
+    // Attached file context is injected per stage according to context_scope:
+    // round 0, critique rounds, and the chairman each get the doc (or not)
+    // independently. with_context is a no-op when the stage is excluded or no
+    // files were attached, so each variant is just the bare question in that case.
+    let scope = cfg.debate.context_scope;
+    let q_critique = with_context(question, if scope.critique() { context } else { None });
+    let q_chair = with_context(question, if scope.chairman() { context } else { None });
+
+    // Round 0: broadcast the question to all models concurrently. Each model
+    // gets its own persona as the system prompt (None = neutral), so the panel
+    // answers from distinct perspectives.
+    let base = base_prompt(cfg, &with_context(question, if scope.round0() { context } else { None }));
+    let round0 = join_all(providers.iter().map(|p| {
+        let prompt = with_system(base.clone(), persona_system(cfg, p.name()).as_deref());
+        async move { call_one(p.as_ref(), &prompt).await }
+    }))
+    .await;
     rounds.push(Round {
         round: 0,
         answers: round0,
@@ -85,7 +117,7 @@ pub async fn run_debate(
             latest.iter().map(|(n, _)| n.as_str()).collect();
         let answers = join_all(providers.iter().filter(|p| live.contains(p.name())).map(|p| {
             let others = others_labeled(&latest, p.name(), cfg.debate.anonymize);
-            let prompt = critique_prompt(cfg, question, &others);
+            let prompt = with_system(critique_prompt(cfg, &q_critique, &others), persona_system(cfg, p.name()).as_deref());
             async move { call_one(p.as_ref(), &prompt).await }
         }))
         .await;
@@ -119,10 +151,10 @@ pub async fn run_debate(
 
     let (final_answer, report) = match cfg.debate.protocol {
         Protocol::Synthesis => {
-            chairman_decide(&chairmen, cfg, synthesis_prompt(question, &labeled), &latest, &mut warnings).await
+            chairman_decide(&chairmen, cfg, synthesis_prompt(&q_chair, &labeled), &latest, &mut warnings).await
         }
         Protocol::Judge => {
-            chairman_decide(&chairmen, cfg, judge_prompt(question, &labeled), &latest, &mut warnings).await
+            chairman_decide(&chairmen, cfg, judge_prompt(&q_chair, &labeled), &latest, &mut warnings).await
         }
         Protocol::Majority => majority_decide(&latest),
     };
@@ -139,8 +171,13 @@ pub async fn run_debate(
 
 /// Build providers from config, resolve the chairman, and run a full debate.
 /// Shared by the CLI, MCP, and HTTP surfaces. Apply any rounds/protocol
-/// overrides to `cfg` before calling.
-pub async fn debate_from_config(cfg: &Config, question: &str) -> anyhow::Result<DebateResult> {
+/// overrides to `cfg` before calling. `context` is the attached file content
+/// (already gathered/secret-scanned by the caller); None means no attachments.
+pub async fn debate_from_config(
+    cfg: &Config,
+    question: &str,
+    context: Option<&str>,
+) -> anyhow::Result<DebateResult> {
     let providers: Vec<Box<dyn Provider>> = cfg
         .models
         .iter()
@@ -152,7 +189,35 @@ pub async fn debate_from_config(cfg: &Config, question: &str) -> anyhow::Result<
         .find(|p| Some(p.name()) == chair.as_deref())
         .map(|b| b.as_ref())
         .context("chairman model not found among providers")?;
-    run_debate(cfg, &providers, chairman, question).await
+    run_debate(cfg, &providers, chairman, question, context).await
+}
+
+/// Rough token estimate without a tokenizer dependency: ~4 chars per token.
+/// Used to budget attached file context. Shared with the CLI's `--lede` path.
+pub fn est_tokens(s: &str) -> usize {
+    s.chars().count() / 4
+}
+
+/// Truncate `text` to an estimated token budget (chars = max_tokens * 4).
+/// Returns the (possibly shortened) text and whether it was cut. Truncates on a
+/// char boundary, so it never splits a multi-byte character.
+fn cap_to_tokens(text: &str, max_tokens: u32) -> (String, bool) {
+    let max_chars = max_tokens as usize * 4;
+    if text.chars().count() <= max_chars {
+        (text.to_string(), false)
+    } else {
+        (text.chars().take(max_chars).collect(), true)
+    }
+}
+
+/// Prepend attached file content as a labeled "# Reference material" section
+/// ahead of the question. A no-op when context is absent or blank, so callers
+/// that exclude a stage just pass None and get the bare question back.
+fn with_context(question: &str, context: Option<&str>) -> String {
+    match context.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(c) => format!("# Reference material\n{c}\n\n# Question\n{question}"),
+        None => question.to_string(),
+    }
 }
 
 fn base_prompt(cfg: &Config, question: &str) -> Prompt {
@@ -164,8 +229,19 @@ fn base_prompt(cfg: &Config, question: &str) -> Prompt {
     }
 }
 
-async fn broadcast(providers: &[Box<dyn Provider>], prompt: &Prompt) -> Vec<RoundAnswer> {
-    join_all(providers.iter().map(|p| call_one(p.as_ref(), prompt))).await
+/// Set (or clear) a prompt's system message — used to apply per-model personas.
+fn with_system(mut prompt: Prompt, system: Option<&str>) -> Prompt {
+    prompt.system = system.map(|s| s.to_string());
+    prompt
+}
+
+/// Resolve a model's persona to its system-prompt text, if one is configured.
+/// Handles bundled names, file paths, and inline prompts (see persona::resolve).
+/// None when the model has no persona; a resolve error degrades to None (config
+/// validation already vetted it at load, so this only trips if a file vanished).
+fn persona_system(cfg: &Config, model: &str) -> Option<String> {
+    let reference = cfg.models.iter().find(|m| m.name == model)?.persona.as_deref()?;
+    crate::persona::resolve(reference).ok()
 }
 
 async fn call_one(p: &dyn Provider, prompt: &Prompt) -> RoundAnswer {
@@ -373,7 +449,7 @@ mod tests {
             "chair",
             [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
         );
-        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        let res = run_debate(&c, &providers, &chair, "Q", None).await.unwrap();
         assert_eq!(res.rounds[0].answers.len(), 3);
         assert_eq!(res.models_used.len(), 3);
         assert_eq!(res.final_answer, "F");
@@ -390,7 +466,7 @@ mod tests {
             "chair",
             [r#"{"final_answer":"MERGED","agreements":["both agree"],"disagreements":["c"]}"#],
         );
-        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        let res = run_debate(&c, &providers, &chair, "Q", None).await.unwrap();
         assert_eq!(res.final_answer, "MERGED");
         assert_eq!(res.report.agreements, vec!["both agree"]);
     }
@@ -409,7 +485,7 @@ mod tests {
             "chair",
             [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
         );
-        run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        run_debate(&c, &providers, &chair, "Q", None).await.unwrap();
 
         let prompts = log.lock().unwrap();
         let round1 = &prompts[1]; // [0] = broadcast, [1] = critique
@@ -431,7 +507,7 @@ mod tests {
             "chair",
             [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
         );
-        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        let res = run_debate(&c, &providers, &chair, "Q", None).await.unwrap();
         assert_eq!(res.rounds.len(), 4); // round 0 + 3 critique rounds
     }
 
@@ -445,7 +521,7 @@ mod tests {
             Box::new(MockProvider::new("c", ["7"])),
         ];
         let chair = MockProvider::new("chair", ["unused"]);
-        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        let res = run_debate(&c, &providers, &chair, "Q", None).await.unwrap();
         assert_eq!(res.final_answer, "42");
         assert!(res.report.agreements[0].contains("2 of 3"));
     }
@@ -462,7 +538,7 @@ mod tests {
             "chair",
             [r#"{"final_answer":"answer-b","agreements":[],"disagreements":["a was weaker"]}"#],
         );
-        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        let res = run_debate(&c, &providers, &chair, "Q", None).await.unwrap();
         assert_eq!(res.final_answer, "answer-b");
         assert_eq!(res.report.disagreements, vec!["a was weaker"]);
     }
@@ -478,7 +554,7 @@ mod tests {
             "chair",
             [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
         );
-        let res = run_debate(&c, &providers, &chair, "Q").await;
+        let res = run_debate(&c, &providers, &chair, "Q", None).await;
         assert!(res.is_err(), "only 1 of 2 models succeeded → should abort");
     }
 
@@ -495,7 +571,7 @@ mod tests {
             "chair",
             [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
         );
-        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        let res = run_debate(&c, &providers, &chair, "Q", None).await.unwrap();
         assert_eq!(res.models_used.len(), 2);
         assert!(res.models_used.contains(&"a".to_string()));
         assert!(!res.models_used.contains(&"c".to_string()));
@@ -518,7 +594,7 @@ mod tests {
             "chair",
             [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
         );
-        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        let res = run_debate(&c, &providers, &chair, "Q", None).await.unwrap();
         assert_eq!(res.rounds[0].answers.len(), 3, "broadcast calls every provider");
         let critique = &res.rounds[1];
         assert_eq!(critique.answers.len(), 2, "the dead provider must be skipped in critique");
@@ -542,7 +618,7 @@ mod tests {
             "chair",
             [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
         );
-        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        let res = run_debate(&c, &providers, &chair, "Q", None).await.unwrap();
         assert_eq!(res.rounds.len(), 1, "only the broadcast should run under a zero budget");
         assert!(
             res.warnings.iter().any(|w| w.contains("budget")),
@@ -563,7 +639,7 @@ mod tests {
             )),
             Box::new(MockProvider::new("c", ["c-ans"])),
         ];
-        let res = run_debate(&c, &providers, &down_chairman, "Q").await.unwrap();
+        let res = run_debate(&c, &providers, &down_chairman, "Q", None).await.unwrap();
         assert_eq!(res.final_answer, "SYNTH-BY-B", "a down chairman must fail over to a live peer");
         assert!(
             res.warnings.iter().any(|w| w.contains("fell back")),
@@ -596,6 +672,127 @@ mod tests {
         assert_eq!(estimate_calls(3, 2, Protocol::Majority), 9); // no chairman call
     }
 
+    #[test]
+    fn est_tokens_uses_quarter_char_heuristic() {
+        assert_eq!(est_tokens(""), 0);
+        assert_eq!(est_tokens("abcd"), 1); // 4 chars ~= 1 token
+        assert_eq!(est_tokens("abcdefgh"), 2);
+    }
+
+    #[test]
+    fn cap_to_tokens_truncates_only_over_budget() {
+        // Under budget: untouched.
+        let (out, cut) = cap_to_tokens("abcd", 10);
+        assert_eq!(out, "abcd");
+        assert!(!cut);
+        // Over budget: cut to max_tokens*4 chars.
+        let long = "x".repeat(100);
+        let (out, cut) = cap_to_tokens(&long, 5); // 5 tokens -> 20 chars
+        assert_eq!(out.chars().count(), 20);
+        assert!(cut);
+    }
+
+    #[tokio::test]
+    async fn oversize_context_is_truncated_with_warning() {
+        let mut c = cfg(0);
+        c.debate.context_scope = crate::config::ContextScope::Full;
+        c.debate.context_max_tokens = 2; // 2 tokens -> 8 chars cap
+        let a = MockProvider::new("a", ["a0"]);
+        let alog = a.log_handle();
+        let providers: Vec<Box<dyn Provider>> =
+            vec![Box::new(a), Box::new(MockProvider::new("b", ["b0"]))];
+        let chair = MockProvider::new(
+            "chair",
+            [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
+        );
+        let huge = "Z".repeat(400);
+        let res = run_debate(&c, &providers, &chair, "Q", Some(&huge)).await.unwrap();
+        assert!(
+            res.warnings.iter().any(|w| w.contains("truncated")),
+            "an over-cap doc must surface a truncation warning"
+        );
+        // The injected round-0 prompt must carry at most the 8-char cap of the doc.
+        let zs = alog.lock().unwrap()[0].matches('Z').count();
+        assert!(zs <= 8, "doc content in the prompt must be capped (got {zs} Z's)");
+    }
+
+    #[test]
+    fn with_context_wraps_only_when_present() {
+        let wrapped = with_context("Q-TEXT", Some("DOC-BODY"));
+        assert!(wrapped.contains("DOC-BODY"), "the doc must be embedded");
+        assert!(wrapped.contains("Q-TEXT"), "the question must be embedded");
+        assert!(wrapped.contains("# Reference material") && wrapped.contains("# Question"));
+        // Absent or blank context is a passthrough — no wrapper, no empty section.
+        assert_eq!(with_context("Q-TEXT", None), "Q-TEXT");
+        assert_eq!(with_context("Q-TEXT", Some("   ")), "Q-TEXT");
+    }
+
+    #[tokio::test]
+    async fn context_full_reaches_every_stage() {
+        let mut c = cfg(1); // one critique round, scope defaults to full
+        c.debate.context_scope = crate::config::ContextScope::Full;
+        let a = MockProvider::new("a", ["a0", "a1"]);
+        let alog = a.log_handle();
+        let providers: Vec<Box<dyn Provider>> =
+            vec![Box::new(a), Box::new(MockProvider::new("b", ["b0", "b1"]))];
+        let chair = MockProvider::new(
+            "chair",
+            [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
+        );
+        let clog = chair.log_handle();
+        run_debate(&c, &providers, &chair, "Q", Some("DOC-XYZ")).await.unwrap();
+
+        let a = alog.lock().unwrap();
+        assert!(a[0].contains("DOC-XYZ"), "round 0 must see the doc");
+        assert!(a[1].contains("DOC-XYZ"), "critique rounds must see the doc under full");
+        assert!(clog.lock().unwrap()[0].contains("DOC-XYZ"), "chairman must see the doc");
+    }
+
+    #[tokio::test]
+    async fn persona_sets_debater_system_but_chairman_stays_neutral() {
+        let mut c = cfg(1); // one critique round; models a, b, c defined
+        c.models[0].persona = Some("the-challenger".to_string()); // model "a"
+        let a = MockProvider::new("a", ["a0", "a1"]);
+        let alog = a.log_handle();
+        let providers: Vec<Box<dyn Provider>> =
+            vec![Box::new(a), Box::new(MockProvider::new("b", ["b0", "b1"]))];
+        let chair = MockProvider::new(
+            "chair",
+            [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
+        );
+        let clog = chair.log_handle();
+        run_debate(&c, &providers, &chair, "Q", None).await.unwrap();
+
+        let a = alog.lock().unwrap();
+        assert!(a[0].contains("Marcus Vane"), "round 0 must carry the persona system prompt");
+        assert!(a[1].contains("Marcus Vane"), "critique rounds must carry the persona");
+        assert!(
+            !clog.lock().unwrap()[0].contains("Marcus Vane"),
+            "the chairman's synthesis must stay persona-neutral"
+        );
+    }
+
+    #[tokio::test]
+    async fn context_chair_first_skips_critique() {
+        let mut c = cfg(1); // one critique round
+        c.debate.context_scope = crate::config::ContextScope::ChairFirst;
+        let a = MockProvider::new("a", ["a0", "a1"]);
+        let alog = a.log_handle();
+        let providers: Vec<Box<dyn Provider>> =
+            vec![Box::new(a), Box::new(MockProvider::new("b", ["b0", "b1"]))];
+        let chair = MockProvider::new(
+            "chair",
+            [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
+        );
+        let clog = chair.log_handle();
+        run_debate(&c, &providers, &chair, "Q", Some("DOC-XYZ")).await.unwrap();
+
+        let a = alog.lock().unwrap();
+        assert!(a[0].contains("DOC-XYZ"), "round 0 must see the doc");
+        assert!(!a[1].contains("DOC-XYZ"), "critique must NOT see the doc under chair-first");
+        assert!(clog.lock().unwrap()[0].contains("DOC-XYZ"), "chairman must see the doc");
+    }
+
     #[tokio::test]
     async fn warns_on_oversize_context() {
         let mut c = cfg(0);
@@ -608,7 +805,7 @@ mod tests {
             "chair",
             [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
         );
-        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        let res = run_debate(&c, &providers, &chair, "Q", None).await.unwrap();
         assert!(res.warnings.iter().any(|w| w.contains("max_context_kb")));
     }
 }
