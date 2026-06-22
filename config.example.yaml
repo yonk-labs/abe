@@ -24,6 +24,9 @@ debate:
   protocol: synthesis  # synthesis | majority | judge
   anonymize: true      # hide model identities during cross-review
   min_models: 2        # abort if fewer than this respond
+  # max_secs: 540      # optional overall budget: past this, skip remaining
+                       # critique rounds and decide with what's in. Keeps long
+                       # debates under a caller's tool-call timeout (e.g. MCP).
 
 validate:
   reviewers: [codex]   # default reviewer(s) for `abe validate`

@@ -6,6 +6,7 @@ use crate::report::{judge_prompt, parse_synthesis, synthesis_prompt, Report};
 use anyhow::Context;
 use futures::future::join_all;
 use serde::Serialize;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RoundAnswer {
@@ -42,6 +43,9 @@ pub async fn run_debate(
 ) -> anyhow::Result<DebateResult> {
     let mut warnings: Vec<String> = Vec::new();
     let mut rounds: Vec<Round> = Vec::new();
+    // Overall wall-clock budget: a backstop so the debate returns *something*
+    // before a caller's tool-call timeout (e.g. an MCP client) gives up on it.
+    let deadline = cfg.debate.max_secs.map(|s| Instant::now() + Duration::from_secs(s));
 
     // Round 0: broadcast the question to all models concurrently.
     let base = base_prompt(cfg, question);
@@ -60,15 +64,31 @@ pub async fn run_debate(
         );
     }
 
-    // Critique rounds 1..=rounds.
+    // Critique rounds 1..=rounds. Two protections against a slow or dead peer
+    // stalling the whole debate:
+    //   - skip providers that never produced a successful answer; a dead model
+    //     would otherwise be re-called (and re-time-out) every single round.
+    //   - run the survivors concurrently like the broadcast, so one slow peer
+    //     overlaps the others instead of serially adding its latency to theirs.
     for r in 1..=cfg.debate.rounds {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            warnings.push(format!(
+                "debate budget (max_secs={}) reached; skipped critique rounds {}..={}",
+                cfg.debate.max_secs.unwrap_or(0),
+                r,
+                cfg.debate.rounds
+            ));
+            break;
+        }
         let latest = latest_successful(&rounds);
-        let mut answers = Vec::with_capacity(providers.len());
-        for p in providers {
+        let live: std::collections::HashSet<&str> =
+            latest.iter().map(|(n, _)| n.as_str()).collect();
+        let answers = join_all(providers.iter().filter(|p| live.contains(p.name())).map(|p| {
             let others = others_labeled(&latest, p.name(), cfg.debate.anonymize);
             let prompt = critique_prompt(cfg, question, &others);
-            answers.push(call_one(p.as_ref(), &prompt).await);
-        }
+            async move { call_one(p.as_ref(), &prompt).await }
+        }))
+        .await;
         rounds.push(Round { round: r, answers });
     }
 
@@ -481,6 +501,54 @@ mod tests {
         assert!(!res.models_used.contains(&"c".to_string()));
         let r0 = &res.rounds[0];
         assert!(r0.answers.iter().any(|a| a.model == "c" && a.error.is_some()));
+    }
+
+    #[tokio::test]
+    async fn critique_skips_never_successful_providers() {
+        // A provider that fails the broadcast must NOT be re-called in critique
+        // rounds — otherwise a dead/timed-out model burns its full timeout every
+        // single round, serially stalling the whole debate.
+        let c = cfg(1); // one critique round, min_models defaults to 2
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::new("a", ["a0", "a1"])),
+            Box::new(MockProvider::new("b", ["b0", "b1"])),
+            Box::new(crate::provider::FailProvider::new("c")),
+        ];
+        let chair = MockProvider::new(
+            "chair",
+            [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
+        );
+        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        assert_eq!(res.rounds[0].answers.len(), 3, "broadcast calls every provider");
+        let critique = &res.rounds[1];
+        assert_eq!(critique.answers.len(), 2, "the dead provider must be skipped in critique");
+        assert!(
+            critique.answers.iter().all(|a| a.model != "c"),
+            "never-successful provider must not be re-called"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_secs_budget_skips_remaining_rounds() {
+        // A zero budget must trip immediately: run the broadcast, skip all
+        // critique rounds, and still produce a synthesized answer.
+        let mut c = cfg(3); // 3 critique rounds requested
+        c.debate.max_secs = Some(0);
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::new("a", ["a"])),
+            Box::new(MockProvider::new("b", ["b"])),
+        ];
+        let chair = MockProvider::new(
+            "chair",
+            [r#"{"final_answer":"F","agreements":[],"disagreements":[]}"#],
+        );
+        let res = run_debate(&c, &providers, &chair, "Q").await.unwrap();
+        assert_eq!(res.rounds.len(), 1, "only the broadcast should run under a zero budget");
+        assert!(
+            res.warnings.iter().any(|w| w.contains("budget")),
+            "the budget cut-off must surface as a warning"
+        );
+        assert_eq!(res.final_answer, "F", "the decision step still runs after the cut-off");
     }
 
     #[tokio::test]
