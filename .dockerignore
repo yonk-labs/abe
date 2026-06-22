@@ -9,3 +9,5 @@ examples
 .claude-plugin
 commands
 .mcp.json
+# …but keep the bundled persona prompts — they're include_str!'d into the binary.
+!personas

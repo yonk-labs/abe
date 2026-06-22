@@ -10,6 +10,9 @@ WORKDIR /app
 # ponytail: straight copy + build — no dummy-main dep-cache trick until builds are slow enough to need it.
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+# personas/*.md are embedded into the binary via include_str! in src/persona.rs,
+# so they must be in the build context.
+COPY personas ./personas
 RUN cargo build --release
 
 # --- runtime ---
