@@ -16,7 +16,9 @@ models:
   # - { name: claude, kind: anthropic, model: claude-opus-4-8, api_key_env: ANTHROPIC_API_KEY }
 
   # --- Local CLIs (no API key needed; must be installed and on PATH) ---
-  - { name: codex,  kind: cli, cli: codex, fast: true }
+  # `persona:` gives a model a debating voice (a bundled name from `abe personas`,
+  # a file path, or inline text). Optional; default is no persona.
+  - { name: codex,  kind: cli, cli: codex, fast: true, persona: the-challenger }
   - { name: claude, kind: cli, cli: claude }
 
 debate:
@@ -24,6 +26,9 @@ debate:
   protocol: synthesis  # synthesis | majority | judge
   anonymize: true      # hide model identities during cross-review
   min_models: 2        # abort if fewer than this respond
+  context_scope: full  # which stages see `debate --files`: off | first | chair-first | full
+  context_max_tokens: 12000  # cap on attached --files context (~4 chars/token); over this
+                             # it's truncated, or summarized to fit with `debate --lede`
   # max_secs: 540      # optional overall budget: past this, skip remaining
                        # critique rounds and decide with what's in. Keeps long
                        # debates under a caller's tool-call timeout (e.g. MCP).

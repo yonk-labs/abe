@@ -143,7 +143,14 @@ impl Provider for MockProvider {
     }
     async fn complete(&self, prompt: &Prompt) -> Result<Answer, ProviderError> {
         use std::sync::atomic::Ordering;
-        self.log.lock().unwrap().push(prompt.user.clone());
+        // Log the system message inline (only when present) so tests can assert
+        // on persona injection without a separate handle. Prompts with no system
+        // log exactly the user text, leaving existing assertions unaffected.
+        let entry = match &prompt.system {
+            Some(s) => format!("[sys]{s}\n{}", prompt.user),
+            None => prompt.user.clone(),
+        };
+        self.log.lock().unwrap().push(entry);
         let i = self.idx.fetch_add(1, Ordering::SeqCst);
         let text = self
             .answers

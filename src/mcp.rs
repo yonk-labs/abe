@@ -25,6 +25,21 @@ pub struct DebateParams {
     /// Decision protocol: synthesis | majority | judge.
     #[serde(default)]
     pub protocol: Option<String>,
+    /// Reference material (e.g. a design doc/README content) to attach to the
+    /// debate. Pass the file *contents* — abe (as a server) does not read host
+    /// paths. Which rounds see it is governed by `context_scope`.
+    #[serde(default)]
+    pub context: Option<String>,
+    /// Which stages see the context: off | first | chair-first | full
+    /// (default: config, then full).
+    #[serde(default)]
+    pub context_scope: Option<String>,
+    /// Assign debate personas to models: "model=persona,model2=persona2"
+    /// (overrides config). Personas are bundled voices/perspectives a model
+    /// argues in; omit for neutral. Names match the bundled persona set
+    /// (e.g. the-challenger, the-engineer, data-nerd, the-buyer).
+    #[serde(default)]
+    pub personas: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -47,7 +62,10 @@ pub struct ValidateParams {
 #[tool_router]
 impl DebatorServer {
     #[tool(
-        description = "Run a multi-model debate; returns final answer + agreement/disagreement report as JSON."
+        description = "Run a multi-model debate; returns final answer + agreement/disagreement report as JSON. \
+Optionally attach reference material via `context` (e.g. a design doc/README — pass the file contents) and \
+control which rounds see it with `context_scope`. Optionally assign each model a persona (a debating voice) \
+via `personas` (\"model=persona,...\"); call the configured personas resource or run `abe personas` to list them."
     )]
     pub async fn debate(&self, Parameters(p): Parameters<DebateParams>) -> String {
         json_or_error(self.do_debate(p).await)
@@ -81,7 +99,13 @@ impl DebatorServer {
         if let Some(proto) = &p.protocol {
             cfg.debate.protocol = crate::config::parse_protocol(proto)?;
         }
-        let res = crate::debate::debate_from_config(&cfg, &p.prompt).await?;
+        if let Some(cs) = &p.context_scope {
+            cfg.debate.context_scope = crate::config::parse_context_scope(cs)?;
+        }
+        if let Some(spec) = &p.personas {
+            crate::config::apply_persona_overrides(&mut cfg, spec)?;
+        }
+        let res = crate::debate::debate_from_config(&cfg, &p.prompt, p.context.as_deref()).await?;
         Ok(serde_json::to_string(&res)?)
     }
 
