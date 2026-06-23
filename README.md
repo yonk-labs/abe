@@ -8,6 +8,17 @@ No API keys? Use the CLI providers — a debate between `codex` and `claude` run
 
 Three surfaces: a **CLI**, an **MCP server** (for Claude Code and other MCP clients), and a small **web UI + JSON API**.
 
+## Why install Abe?
+
+You trust your work to LLM output, so **don't trust one model with it.** Abe puts multiple LLMs in a structured debate so you get:
+
+- **A second opinion, automatically.** A second model reads the first's answer and disagrees where it would — catches the confident-but-wrong case any single review misses.
+- **Multi-model consensus.** When models agree, you ship faster. When they don't, you know which part of your reasoning is genuinely contested.
+- **A panel of distinct voices.** Give one model a security lens, another an SRE lens, another a product lens — and have them argue with each other instead of politely agreeing.
+- **Grounded in your material.** Attach the design doc, the spec, the PR diff — the debate is over *your* code, not a generic prompt.
+- **Works with no API keys.** Pair `codex` and `claude` as CLI providers and a debate runs with zero cloud config. Add a local URL (vLLM, Ollama, LM Studio) and you have a three-way panel with no keys either.
+- **Plays nice with your agent.** As an MCP server, Claude Code / opencode / Codex can call `debate` and `validate` directly while you're working — no copy-pasting prompts.
+
 ## Install
 
 ### Option 1 — prebuilt binary (no toolchain)
@@ -66,6 +77,33 @@ Reload (`/reload-plugins` or restart Claude Code). You get the `abe` MCP tools (
 The `debate` MCP tool also accepts `context` (attach a doc — pass its contents), `context_scope`, and `personas` (`"model=persona,…"`), so Claude can ground a debate in a file you're discussing or run it as a panel of [personas](#personas). The `/abe:debate` command is wired to use them when your request calls for it.
 
 **Prerequisites recap:** `abe` on your `PATH` + a config (`abe init` writes `~/.config/abe/config.yaml`). Without both, the MCP server can't start.
+
+### With opencode
+
+opencode has no plugin marketplace, but it speaks MCP natively — register the `abe` stdio server in your opencode config (`~/.config/opencode/opencode.json` or project-local `opencode.json`):
+
+```json
+{
+  "mcp": {
+    "abe": {
+      "type": "local",
+      "command": ["abe", "mcp"]
+    }
+  }
+}
+```
+
+Restart opencode and the `abe` MCP tools (`debate`, `validate`) become callable from any session, with the same `context` / `context_scope` / `personas` options as the Claude Code plugin. Prereqs are the same: `abe` on your `PATH` and a config at `~/.config/abe/config.yaml` (run `abe init` if you skipped the install wizard).
+
+**Slash commands.** opencode picks up commands from `~/.config/opencode/command/*.md` (frontmatter `description` + `$ARGUMENTS`, same format as Claude Code's `commands/`). To get `/abe-debate` and `/abe-validate` matching the Claude Code experience, symlink the two shipped commands:
+
+```bash
+mkdir -p ~/.config/opencode/command
+ln -s /path/to/abe/commands/debate.md   ~/.config/opencode/command/abe-debate.md
+ln -s /path/to/abe/commands/validate.md ~/.config/opencode/command/abe-validate.md
+```
+
+The repo's `commands/debate.md` and `commands/validate.md` are the canonical source — symlinks so edits there flow through. If you installed via the prebuilt binary or `cargo install`, clone the repo (or copy the two `.md` files) to a stable path and symlink from there.
 
 ### With Codex or other MCP clients
 
