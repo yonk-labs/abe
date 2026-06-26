@@ -1,6 +1,6 @@
 [package]
 name = "abe"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 description = "Multi-provider LLM debate/consensus proxy (HTTP + CLI providers)"
 license = "MIT"
