@@ -117,7 +117,8 @@ pub async fn run_debate(
             latest.iter().map(|(n, _)| n.as_str()).collect();
         let answers = join_all(providers.iter().filter(|p| live.contains(p.name())).map(|p| {
             let others = others_labeled(&latest, p.name(), cfg.debate.anonymize);
-            let prompt = with_system(critique_prompt(cfg, &q_critique, &others), persona_system(cfg, p.name()).as_deref());
+            let mine = latest.iter().find(|(n, _)| n == p.name()).map(|(_, t)| t.clone());
+            let prompt = with_system(critique_prompt(cfg, &q_critique, mine.as_deref(), &others), persona_system(cfg, p.name()).as_deref());
             async move { call_one(p.as_ref(), &prompt).await }
         }))
         .await;
@@ -308,11 +309,23 @@ fn others_labeled(answers: &[(String, String)], me: &str, anonymize: bool) -> St
     label_all(&others, anonymize)
 }
 
-fn critique_prompt(cfg: &Config, question: &str, others: &str) -> Prompt {
+fn critique_prompt(cfg: &Config, question: &str, mine: Option<&str>, others: &str) -> Prompt {
+    // Anchor the model to its OWN prior answer. Provider calls are stateless, so
+    // without this a model enters the critique round seeing only its peers and
+    // drifts onto whatever it's shown — capitulating to a wrong peer or flipping
+    // off a correct position just to differentiate. The stability instruction
+    // makes a position change require a found error, not social pressure.
+    let your_answer = match mine.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) => format!("Your previous answer:\n{m}\n\n"),
+        None => String::new(),
+    };
     let user = format!(
         "Original question:\n{question}\n\n\
+{your_answer}\
 Other participants' current answers:\n{others}\n\n\
-Critique the other answers — point out any errors or points of disagreement — then give your own improved, final answer to the original question."
+Critique the other answers — point out any concrete, verifiable errors. Then give your final answer to the original question. \
+Change your previous answer only if you found a real error in your own reasoning; if it still stands, restate and defend it. \
+Do not switch merely to agree with the others, and do not switch merely to differ from them."
     );
     Prompt {
         system: None,
@@ -472,7 +485,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_round_feeds_others_answers_anonymized() {
+    async fn critique_anchors_own_answer_and_anonymizes_others() {
+        // The critique round must hand the model BOTH its own prior answer (an
+        // anchor against drift) and the others' answers (anonymized). Without the
+        // own-answer anchor, a stateless model drifts onto whatever peer it sees;
+        // the stability instruction is what makes a flip require a found error.
         let c = cfg(1); // rounds = 1, anonymize defaults true
         let a = MockProvider::new("a", ["a-r0", "a-r1"]);
         let log = a.log_handle();
@@ -491,9 +508,14 @@ mod tests {
         let round1 = &prompts[1]; // [0] = broadcast, [1] = critique
         assert!(round1.contains("b-r0"), "should include other models' answers");
         assert!(round1.contains("c-r0"));
-        assert!(!round1.contains("a-r0"), "should exclude its own answer");
-        assert!(round1.contains("Solution A"), "labels should be anonymized");
-        assert!(!round1.contains("### b"), "should not label by model name");
+        assert!(round1.contains("Your previous answer"), "must anchor the model to its own prior answer");
+        assert!(round1.contains("a-r0"), "the model's own prior answer must be present as the anchor");
+        assert!(round1.contains("Solution A"), "other answers should be anonymized");
+        assert!(!round1.contains("### b"), "should not label others by model name");
+        assert!(
+            round1.contains("only if you found a real error"),
+            "must instruct the model to hold its position absent a found error"
+        );
     }
 
     #[tokio::test]
