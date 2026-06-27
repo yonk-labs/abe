@@ -261,6 +261,8 @@ Set it durably in YAML per model (`persona: the-challenger`), or override per ca
 - **judge** — a judge model scores each answer and picks the single best, verbatim.
 - **majority** — deterministic clustering of equal answers (no extra model call); best for short/factual answers.
 
+For Bob/Hector review loops, use `abe debate --protocol judge ...` when the caller needs a decisive model-mediated call. `abe validate ...` is cheaper, but it is a second opinion and may be prose-only.
+
 ## How it works
 
 1. Broadcast the prompt to every model concurrently.
