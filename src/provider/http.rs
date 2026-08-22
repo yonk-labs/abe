@@ -116,7 +116,23 @@ impl Provider for HttpProvider {
             let opts = ChatOptions::default()
                 .with_temperature(temperature)
                 .with_max_tokens(max_tokens);
-            async move { self.client.exec_chat(&self.model, req, Some(&opts)).await }
+            async move {
+                let r = self
+                    .client
+                    .exec_chat(&self.model, req, Some(&opts))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                // An empty completion is a backend flake (observed intermittently
+                // against local vLLM endpoints — same prompt succeeds on one call,
+                // returns empty text on the next), not a genuine "the model said
+                // nothing" answer worth accepting. Treat it as retriable rather
+                // than silently returning an empty Answer as if it were success.
+                if is_empty_completion(r.first_text()) {
+                    Err("empty completion (likely a backend flake)".to_string())
+                } else {
+                    Ok(r)
+                }
+            }
         });
         let res = match tokio::time::timeout(Duration::from_secs(self.timeout_secs), call).await {
             Ok(r) => r,
@@ -136,10 +152,18 @@ impl Provider for HttpProvider {
             }),
             Err(e) => Err(ProviderError::Backend {
                 name: self.name.clone(),
-                source: anyhow::anyhow!(e.to_string()),
+                source: anyhow::anyhow!(e),
             }),
         }
     }
+}
+
+/// True for a completion worth treating as a backend flake and retrying,
+/// rather than a genuine (if terse) answer — no text at all, or whitespace
+/// only. Observed intermittently against local vLLM endpoints: the identical
+/// prompt succeeds on one call and returns empty text on the next.
+fn is_empty_completion(text: Option<&str>) -> bool {
+    text.map(|t| t.trim().is_empty()).unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -147,6 +171,15 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::provider::Provider;
+
+    #[test]
+    fn empty_completion_detection() {
+        assert!(is_empty_completion(None));
+        assert!(is_empty_completion(Some("")));
+        assert!(is_empty_completion(Some("   \n\t")));
+        assert!(!is_empty_completion(Some("ok")));
+        assert!(!is_empty_completion(Some("  ok  ")));
+    }
 
     #[test]
     fn builds_for_openai() {
