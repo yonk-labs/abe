@@ -10,6 +10,14 @@ use serde::Serialize;
 pub struct ValidateResult {
     pub reviewer: String,
     pub take: String,
+    /// Machine-readable verdict ("pass" | "fail" | "uncertain"), present only in
+    /// `--verdict` mode. Lets callers (bob/hector) gate on a field instead of
+    /// grepping prose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<String>,
+    /// Bullet reasons backing the verdict (verdict mode only).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub reasons: Vec<String>,
     /// Set when the preferred reviewer was unavailable and we fell back to
     /// another model — names what was skipped and why.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -24,19 +32,37 @@ pub async fn run_validate(
     statement: &str,
     prior_reasoning: Option<&str>,
     context: Option<&str>,
+    verdict: bool,
 ) -> anyhow::Result<ValidateResult> {
     let prompt = Prompt {
         system: None,
-        user: validate_prompt(statement, prior_reasoning, context),
-        temperature: 0.7,
+        user: if verdict {
+            verdict_prompt(statement, prior_reasoning, context)
+        } else {
+            validate_prompt(statement, prior_reasoning, context)
+        },
+        // Verdict mode wants a deterministic classification; prose mode wants a
+        // freer second opinion.
+        temperature: if verdict { 0.2 } else { 0.7 },
         max_tokens: 1024,
     };
     let ans = reviewer.complete(&prompt).await?;
-    Ok(ValidateResult {
+    let mut res = ValidateResult {
         reviewer: reviewer.name().to_string(),
-        take: ans.text,
+        take: ans.text.clone(),
+        verdict: None,
+        reasons: Vec::new(),
         note: None,
-    })
+    };
+    if verdict {
+        let (v, reasons, summary) = parse_verdict(&ans.text);
+        res.verdict = Some(v);
+        res.reasons = reasons;
+        if let Some(s) = summary {
+            res.take = s; // surface the one-line summary as the take
+        }
+    }
+    Ok(res)
 }
 
 /// Try reviewers in order; return the first that answers. A reviewer that errors
@@ -48,10 +74,11 @@ async fn first_reviewer_take(
     statement: &str,
     prior_reasoning: Option<&str>,
     context: Option<&str>,
+    verdict: bool,
 ) -> anyhow::Result<ValidateResult> {
     let mut skipped: Vec<String> = Vec::new();
     for (i, p) in reviewers.iter().enumerate() {
-        match run_validate(p.as_ref(), statement, prior_reasoning, context).await {
+        match run_validate(p.as_ref(), statement, prior_reasoning, context, verdict).await {
             Ok(mut res) => {
                 if i > 0 {
                     res.note = Some(format!("fell back to `{}` — skipped: {}", p.name(), skipped.join("; ")));
@@ -73,6 +100,7 @@ pub async fn validate_from_config(
     reviewer: Option<&str>,
     prior_reasoning: Option<&str>,
     context: Option<&str>,
+    verdict: bool,
 ) -> anyhow::Result<ValidateResult> {
     // Preference order: explicit reviewer → configured reviewers → all models,
     // deduped. Building a provider is cheap and side-effect-free (no network),
@@ -106,7 +134,7 @@ pub async fn validate_from_config(
         };
         anyhow::bail!(why);
     }
-    first_reviewer_take(&candidates, statement, prior_reasoning, context).await
+    first_reviewer_take(&candidates, statement, prior_reasoning, context, verdict).await
 }
 
 /// Mirrors the `second-opinion` skill's prompt: frame the reviewer as a non-host
@@ -140,6 +168,59 @@ Be concise. Skip preamble."
     )
 }
 
+/// Verdict-mode prompt: ask the reviewer for a machine-readable pass/fail/uncertain
+/// classification instead of prose. Used when bob/hector need to gate on a field.
+fn verdict_prompt(statement: &str, prior_reasoning: Option<&str>, context: Option<&str>) -> String {
+    let prior = prior_reasoning
+        .filter(|s| !s.trim().is_empty())
+        .map(|p| format!("\n\n# The author's reasoning\n{p}"))
+        .unwrap_or_default();
+    let ctx = context
+        .filter(|s| !s.trim().is_empty())
+        .map(|c| format!("\n\n# Context\n{c}"))
+        .unwrap_or_default();
+    format!(
+        "You are an impartial reviewer. Judge whether the statement/decision below is correct and complete.\n\n\
+IMPORTANT: You have NO access to anything beyond THIS prompt. Judge only what is shown; do not invent code, APIs, or behavior you cannot see. If you cannot tell, the verdict is \"uncertain\".\n\n\
+# Statement to judge\n{statement}{prior}{ctx}\n\n\
+Respond with ONLY a JSON object (no prose, no markdown fences) in exactly this shape:\n\
+{{\"verdict\": \"pass\" | \"fail\" | \"uncertain\", \"reasons\": [\"<short, specific reason>\"], \"summary\": \"<one line>\"}}\n\
+- \"pass\": correct and complete; no real defect.\n\
+- \"fail\": a genuine defect, incorrectness, or unmet requirement. List what.\n\
+- \"uncertain\": not determinable from the information given."
+    )
+}
+
+fn extract_json_object(text: &str) -> Option<String> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    (end > start).then(|| text[start..=end].to_string())
+}
+
+/// Parse the reviewer's verdict JSON. Tolerant: anything unparseable or an
+/// unknown verdict string degrades to "uncertain" with empty reasons — a missing
+/// gate must never read as a pass.
+fn parse_verdict(text: &str) -> (String, Vec<String>, Option<String>) {
+    if let Some(json) = extract_json_object(text) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+            let verdict = match v.get("verdict").and_then(|x| x.as_str()).map(str::to_lowercase).as_deref() {
+                Some("pass") => "pass",
+                Some("fail") => "fail",
+                _ => "uncertain",
+            }
+            .to_string();
+            let reasons = v
+                .get("reasons")
+                .and_then(|x| x.as_array())
+                .map(|a| a.iter().filter_map(|i| i.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let summary = v.get("summary").and_then(|x| x.as_str()).map(String::from);
+            return (verdict, reasons, summary);
+        }
+    }
+    ("uncertain".to_string(), Vec::new(), None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,7 +229,7 @@ mod tests {
     #[tokio::test]
     async fn validate_returns_reviewer_take() {
         let reviewer = MockProvider::new("codex", ["Looks sound, but watch concurrency."]);
-        let res = run_validate(&reviewer, "We should use Rust.", None, None)
+        let res = run_validate(&reviewer, "We should use Rust.", None, None, false)
             .await
             .unwrap();
         assert_eq!(res.reviewer, "codex");
@@ -159,7 +240,7 @@ mod tests {
     async fn validate_includes_statement_and_context() {
         let reviewer = MockProvider::new("codex", ["ok"]);
         let log = reviewer.log_handle();
-        run_validate(&reviewer, "STMT-TEXT", None, Some("CTX-DATA"))
+        run_validate(&reviewer, "STMT-TEXT", None, Some("CTX-DATA"), false)
             .await
             .unwrap();
         let prompt = &log.lock().unwrap()[0];
@@ -171,7 +252,7 @@ mod tests {
     async fn validate_includes_prior_reasoning() {
         let reviewer = MockProvider::new("codex", ["ok"]);
         let log = reviewer.log_handle();
-        run_validate(&reviewer, "Use Postgres", Some("HOST-TAKE-XYZ"), None)
+        run_validate(&reviewer, "Use Postgres", Some("HOST-TAKE-XYZ"), None, false)
             .await
             .unwrap();
         let prompt = &log.lock().unwrap()[0];
@@ -185,7 +266,7 @@ mod tests {
             Box::new(crate::provider::FailProvider::new("gpt")),
             Box::new(MockProvider::new("qwen", ["second opinion here"])),
         ];
-        let res = first_reviewer_take(&reviewers, "ship it?", None, None).await.unwrap();
+        let res = first_reviewer_take(&reviewers, "ship it?", None, None, false).await.unwrap();
         assert_eq!(res.reviewer, "qwen", "should fall back to the live model");
         assert!(res.note.as_deref().unwrap_or_default().contains("gpt"), "note must name the skipped reviewer");
     }
@@ -196,7 +277,7 @@ mod tests {
             Box::new(MockProvider::new("gpt", ["ok"])),
             Box::new(MockProvider::new("qwen", ["unused"])),
         ];
-        let res = first_reviewer_take(&reviewers, "x", None, None).await.unwrap();
+        let res = first_reviewer_take(&reviewers, "x", None, None, false).await.unwrap();
         assert_eq!(res.reviewer, "gpt");
         assert!(res.note.is_none(), "no fallback → no note");
     }
@@ -207,7 +288,29 @@ mod tests {
             Box::new(crate::provider::FailProvider::new("gpt")),
             Box::new(crate::provider::FailProvider::new("qwen")),
         ];
-        let err = first_reviewer_take(&reviewers, "ship it?", None, None).await.unwrap_err();
+        let err = first_reviewer_take(&reviewers, "ship it?", None, None, false).await.unwrap_err();
         assert!(err.to_string().contains("no reviewer could be reached"));
+    }
+
+    #[tokio::test]
+    async fn verdict_mode_parses_structured_json() {
+        let reviewer = MockProvider::new(
+            "codex",
+            [r#"{"verdict":"fail","reasons":["off-by-one in loop"],"summary":"bound is wrong"}"#],
+        );
+        let res = run_validate(&reviewer, "diff implements spec?", None, None, true)
+            .await
+            .unwrap();
+        assert_eq!(res.verdict.as_deref(), Some("fail"));
+        assert_eq!(res.reasons, vec!["off-by-one in loop"]);
+        assert_eq!(res.take, "bound is wrong"); // summary surfaced as take
+    }
+
+    #[test]
+    fn parse_verdict_degrades_to_uncertain() {
+        // Unparseable / missing verdict must never read as a pass.
+        assert_eq!(parse_verdict("not json at all").0, "uncertain");
+        assert_eq!(parse_verdict(r#"{"verdict":"banana"}"#).0, "uncertain");
+        assert_eq!(parse_verdict(r#"prefix {"verdict":"pass","summary":"ok"} suffix"#).0, "pass");
     }
 }

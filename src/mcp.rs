@@ -117,6 +117,7 @@ impl DebatorServer {
             p.reviewer.as_deref(),
             p.prior_reasoning.as_deref(),
             p.context.as_deref(),
+            false, // MCP validate stays prose; verdict mode is the CLI orchestration path
         )
         .await?;
         Ok(serde_json::to_string(&res)?)

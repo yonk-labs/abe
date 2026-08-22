@@ -135,6 +135,10 @@ pub struct ValidateArgs {
     /// Emit JSON instead of pretty text.
     #[arg(long)]
     pub json: bool,
+    /// Ask for a machine-readable verdict (pass/fail/uncertain + reasons) instead
+    /// of a prose take. For orchestrators (bob/hector) that gate on a field.
+    #[arg(long)]
+    pub verdict: bool,
 }
 
 pub async fn run_validate_cmd(args: ValidateArgs) -> anyhow::Result<()> {
@@ -146,11 +150,24 @@ pub async fn run_validate_cmd(args: ValidateArgs) -> anyhow::Result<()> {
         args.reviewer.as_deref(),
         args.prior_reasoning.as_deref(),
         context.as_deref(),
+        args.verdict,
     )
     .await?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&res)?);
+    } else if let Some(v) = &res.verdict {
+        println!("\n=== {} verdict: {} ===\n", res.reviewer, v.to_uppercase());
+        if !res.take.is_empty() {
+            println!("{}\n", res.take);
+        }
+        for r in &res.reasons {
+            println!("  - {r}");
+        }
+        if let Some(note) = &res.note {
+            println!("\nnote: {note}");
+        }
+        println!();
     } else {
         println!("\n=== {}'s take ===\n\n{}\n", res.reviewer, res.take);
         if let Some(note) = &res.note {

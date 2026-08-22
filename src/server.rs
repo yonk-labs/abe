@@ -43,6 +43,8 @@ struct ValidateReq {
     prior_reasoning: Option<String>,
     #[serde(default)]
     context: Option<String>,
+    #[serde(default)]
+    verdict: Option<bool>,
 }
 
 pub async fn serve(config_path: Option<String>, host: &str, port: u16) -> anyhow::Result<()> {
@@ -128,6 +130,7 @@ async fn validate_handler(
         req.reviewer.as_deref(),
         req.prior_reasoning.as_deref(),
         req.context.as_deref(),
+        req.verdict.unwrap_or(false),
     )
     .await
     {
