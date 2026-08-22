@@ -116,6 +116,13 @@ pub struct ModelCfg {
     pub base_url: Option<String>,
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// Reference a shared LAN/cloud endpoint by key from
+    /// ~/.config/yonk-suite/models.yaml instead of repeating base_url/model
+    /// inline — resolved once at load time, before validate() runs. Fixes a
+    /// real recurring bug: a LAN box's served model changes and every tool's
+    /// own config had to be hand-updated separately.
+    #[serde(default)]
+    pub endpoint: Option<String>,
     #[serde(default)]
     pub cli: Option<CliKind>,
     #[serde(default)]
@@ -187,9 +194,39 @@ impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Config> {
         let s = std::fs::read_to_string(path)
             .with_context(|| format!("reading config {}", path.display()))?;
-        let c = Self::from_yaml(&s)?;
+        let mut c = Self::from_yaml(&s)?;
+        c.resolve_endpoints()?;
         c.validate()?;
         Ok(c)
+    }
+
+    /// Fill in model/base_url/api_key_env for any entry that set `endpoint:`
+    /// instead of specifying them inline, from the shared suite-wide roster.
+    /// Runs before validate() so a resolved entry looks identical to one that
+    /// always had model/base_url set directly — everything downstream stays
+    /// unaware `endpoint` exists at all.
+    fn resolve_endpoints(&mut self) -> anyhow::Result<()> {
+        let shared = crate::shared_endpoints::load()?;
+        for m in &mut self.models {
+            let Some(key) = &m.endpoint else { continue };
+            let Some(ep) = shared.get(key) else {
+                anyhow::bail!(
+                    "model `{}` references endpoint `{key}`, which is not defined in \
+                     ~/.config/yonk-suite/models.yaml",
+                    m.name
+                );
+            };
+            if m.model.is_none() {
+                m.model = Some(ep.model.clone());
+            }
+            if m.base_url.is_none() {
+                m.base_url = Some(ep.base_url.clone());
+            }
+            if m.api_key_env.is_none() {
+                m.api_key_env = ep.api_key_env.clone();
+            }
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {

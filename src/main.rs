@@ -8,6 +8,7 @@ mod provider;
 mod report;
 mod safety;
 mod server;
+mod shared_endpoints;
 mod thread;
 mod validate;
 
