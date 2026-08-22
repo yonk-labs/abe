@@ -8,6 +8,7 @@ mod provider;
 mod report;
 mod safety;
 mod server;
+mod thread;
 mod validate;
 
 use clap::Parser;
