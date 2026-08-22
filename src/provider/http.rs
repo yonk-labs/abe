@@ -63,9 +63,11 @@ fn build_client(cfg: &ModelCfg) -> anyhow::Result<Client> {
                 None => endpoint,
             };
             let auth = match &api_key_env {
-                // ponytail: leak the env-var name to satisfy from_static-style
-                // 'static bound; one tiny one-time leak per client build.
-                Some(name) => AuthData::from_env(Box::leak(name.clone().into_boxed_str())),
+                // from_env takes impl Into<String> — pass the owned name directly.
+                // (Previously leaked a &'static str per client build; providers are
+                // rebuilt per request on the serve/MCP surfaces, so that leaked on
+                // every request.)
+                Some(name) => AuthData::from_env(name.clone()),
                 None => auth,
             };
             let model = ModelIden::new(adapter, model.model_name);
@@ -83,8 +85,8 @@ fn endpoint_from(base_url: &str) -> Endpoint {
     if !u.ends_with('/') {
         u.push('/');
     }
-    // ponytail: Endpoint::from_static needs 'static; leak the config URL once.
-    Endpoint::from_static(Box::leak(u.into_boxed_str()))
+    // from_owned takes an owned Arc<str> — no leak (unlike from_static's 'static).
+    Endpoint::from_owned(u)
 }
 
 #[async_trait]
