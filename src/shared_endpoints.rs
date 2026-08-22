@@ -21,6 +21,8 @@ pub struct SharedEndpoint {
     pub model: String,
     #[serde(default)]
     pub api_key_env: Option<String>,
+    #[serde(default)]
+    pub context_window: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

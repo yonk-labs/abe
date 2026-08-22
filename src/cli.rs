@@ -304,7 +304,11 @@ pub async fn run_models_cmd(args: ModelsArgs) -> anyhow::Result<()> {
                 None => "(no api_key_env \u{2014} ok for local/no-auth)".to_string(),
             },
         };
-        println!("  {:14} {:24} {}", m.name, kind_label(m), status);
+        let ctx = m
+            .context_window
+            .map(|c| format!(" (ctx {c})"))
+            .unwrap_or_default();
+        println!("  {:14} {:24} {}{ctx}", m.name, kind_label(m), status);
     }
     Ok(())
 }

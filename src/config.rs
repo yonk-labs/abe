@@ -133,6 +133,11 @@ pub struct ModelCfg {
     /// None = no persona. Overridable per call with `debate --persona`.
     #[serde(default)]
     pub persona: Option<String>,
+    /// Real serving-time context window, where known — resolved from the
+    /// shared endpoint roster same as model/base_url. Advisory only today,
+    /// nothing enforces it yet.
+    #[serde(default)]
+    pub context_window: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -224,6 +229,9 @@ impl Config {
             }
             if m.api_key_env.is_none() {
                 m.api_key_env = ep.api_key_env.clone();
+            }
+            if m.context_window.is_none() {
+                m.context_window = ep.context_window;
             }
         }
         Ok(())
