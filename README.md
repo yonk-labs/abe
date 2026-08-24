@@ -180,6 +180,29 @@ validate:
   reviewers: [codex]    # default reviewer(s) for `abe validate`
 ```
 
+### Shared endpoints across the suite
+
+A model entry can reference a LAN endpoint defined once in `~/.config/yonk-suite/models.yaml` instead of repeating `model` / `base_url` / `api_key_env` inline. It's the same file bob, hector, and depot read, so a LAN box's served model only needs updating in one place instead of separately in every tool's own config.
+
+```yaml
+models:
+  - { name: local133, kind: openai-compatible, endpoint: lan133 }
+```
+
+```yaml
+# ~/.config/yonk-suite/models.yaml
+endpoints:
+  lan133:
+    base_url: http://192.168.1.133:8000/v1
+    model: qwen36-nvfp4
+    context_window: 131072   # optional
+    api_key_env: SOME_KEY    # optional
+```
+
+Resolution happens once at config load, before validation — an `endpoint:` naming a key that isn't in the shared file errors clearly at startup. Fully backward compatible: entries without `endpoint:` work exactly as before.
+
+`context_window` (set inline or resolved via `endpoint:`) records the model's real serving-time context window in tokens; `abe models` shows it as `(ctx N)` next to that model's status line. Advisory only right now — nothing enforces or budgets against it yet.
+
 ## Attaching files (context)
 
 Pass reference material — a design doc, README, architecture notes, a spec — so the models debate *your* material instead of guessing. Files are read locally, **secret-scanned**, then injected into the prompt.
@@ -270,6 +293,8 @@ For Bob/Hector review loops, use `abe debate --protocol judge ...` when the call
 3. Apply the decision protocol; always produce an agreement/disagreement report.
 
 The report is a *synthesized interpretation* — raw per-model answers are always preserved in the result (`--json` / `rounds`).
+
+HTTP providers treat an empty or whitespace-only completion as a retriable error rather than accepting it as a valid (empty) answer — this matters most against local/self-hosted endpoints, where empty completions are a real failure mode rather than an edge case.
 
 ## Safety
 
