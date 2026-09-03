@@ -150,6 +150,11 @@ fn validate_prompt(statement: &str, prior_reasoning: Option<&str>, context: Opti
         .filter(|s| !s.trim().is_empty())
         .map(|c| format!("\n\n# Context\n{c}"))
         .unwrap_or_default();
+    let calibration = crate::report::gate_calibration_for(&[
+        statement,
+        prior_reasoning.unwrap_or(""),
+        context.unwrap_or(""),
+    ]);
     format!(
         "You are being consulted for a SECOND OPINION on a technical decision.\n\
 Another AI assistant is the primary collaborator and has its own view.\n\
@@ -164,7 +169,7 @@ contents, APIs, or behavior you cannot see.\n\n\
 2. The single biggest risk or blind spot you see.\n\
 3. One thing the host probably got right, and one thing it might be wrong about.\n\
 4. If you'd approach this fundamentally differently, say so plainly.\n\
-Be concise. Skip preamble."
+Be concise. Skip preamble.{calibration}"
     )
 }
 
@@ -179,6 +184,11 @@ fn verdict_prompt(statement: &str, prior_reasoning: Option<&str>, context: Optio
         .filter(|s| !s.trim().is_empty())
         .map(|c| format!("\n\n# Context\n{c}"))
         .unwrap_or_default();
+    let calibration = crate::report::gate_calibration_for(&[
+        statement,
+        prior_reasoning.unwrap_or(""),
+        context.unwrap_or(""),
+    ]);
     format!(
         "You are an impartial reviewer. Judge whether the statement/decision below is correct and complete.\n\n\
 IMPORTANT: You have NO access to anything beyond THIS prompt. Judge only what is shown; do not invent code, APIs, or behavior you cannot see. If you cannot tell, the verdict is \"uncertain\".\n\n\
@@ -187,7 +197,7 @@ Respond with ONLY a JSON object (no prose, no markdown fences) in exactly this s
 {{\"verdict\": \"pass\" | \"fail\" | \"uncertain\", \"reasons\": [\"<short, specific reason>\"], \"summary\": \"<one line>\"}}\n\
 - \"pass\": correct and complete; no real defect.\n\
 - \"fail\": a genuine defect, incorrectness, or unmet requirement. List what.\n\
-- \"uncertain\": not determinable from the information given."
+- \"uncertain\": not determinable from the information given.{calibration}"
     )
 }
 
@@ -312,5 +322,39 @@ mod tests {
         assert_eq!(parse_verdict("not json at all").0, "uncertain");
         assert_eq!(parse_verdict(r#"{"verdict":"banana"}"#).0, "uncertain");
         assert_eq!(parse_verdict(r#"prefix {"verdict":"pass","summary":"ok"} suffix"#).0, "pass");
+    }
+
+    #[test]
+    fn verdict_prompt_calibrates_when_gate_passed() {
+        // Bob's judge statements embed "## VERIFY OUTPUT" (and only run the
+        // judge on gate-passing diffs) — the calibration must fire.
+        let p = verdict_prompt(
+            "Does the diff implement the spec?\n\n## SPEC\nx\n\n## VERIFY OUTPUT\nok\n\n## DIFF\ny",
+            None,
+            None,
+        );
+        assert!(p.contains("CALIBRATION"), "gate-pass language must trigger calibration");
+        assert!(p.contains("never fail on speculation"));
+    }
+
+    #[test]
+    fn verdict_prompt_untouched_without_gate_language() {
+        let p = verdict_prompt("Is this design sound?", None, None);
+        assert!(!p.contains("CALIBRATION"), "no gate markers → no calibration");
+    }
+
+    #[test]
+    fn verdict_prompt_calibrates_on_context_too() {
+        // Gate-pass language may arrive via MCP `context` instead of the statement.
+        let p = verdict_prompt("judge this diff", None, Some("deterministic gate: all checks passed"));
+        assert!(p.contains("CALIBRATION"));
+    }
+
+    #[test]
+    fn validate_prompt_prose_mode_also_calibrates() {
+        let p = validate_prompt("judge this\n\n## VERIFY OUTPUT\n1 passed", None, None);
+        assert!(p.contains("CALIBRATION"));
+        let bare = validate_prompt("judge this", None, None);
+        assert!(!bare.contains("CALIBRATION"));
     }
 }

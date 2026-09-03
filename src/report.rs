@@ -51,15 +51,50 @@ fn extract_json_object(text: &str) -> Option<String> {
     (end > start).then(|| text[start..=end].to_string())
 }
 
+/// Markers that tell a judge-style prompt the caller has already run a
+/// deterministic verify gate (build/tests) and it PASSED — bob embeds a
+/// `## VERIFY OUTPUT` section in its judge statements and only invokes the
+/// judge on gate-passing diffs. Case-insensitive substring match.
+const GATE_PASS_MARKERS: &[&str] = &[
+    "verify output",
+    "verify passed",
+    "verify gate passed",
+    "gate passed",
+    "deterministic gate",
+];
+
+/// Calibration block appended to judge-style prompts when the input shows a
+/// passing deterministic gate. Without it, judges re-litigate spec wording
+/// and completeness-by-literal-reading, turning gate-passing diffs into
+/// fail/uncertain verdicts (observed 2026-09: bob runs forced into
+/// RepeatedUncertain on spec-lawyering).
+const GATE_PASSED_CALIBRATION: &str = "\n\nCALIBRATION: the input shows a deterministic verify gate (build/tests) has already PASSED for this change. That gate — not you — is the authority on build and test behavior. You may block ONLY on a demonstrated correctness or safety defect visible in the diff itself: never on spec interpretation, wording, scope/completeness by literal reading, or style. If you find no such defect, return pass — or uncertain with concrete reasons if the information is genuinely insufficient — but never fail on speculation or wording disputes.";
+
+/// Return the calibration block when any of the given texts carries
+/// gate-pass language, else an empty string. Shared by the judge/validate
+/// prompt builders so all judge surfaces get the same conditioning.
+pub(crate) fn gate_calibration_for(texts: &[&str]) -> &'static str {
+    let hit = texts.iter().any(|t| {
+        let t = t.to_lowercase();
+        GATE_PASS_MARKERS.iter().any(|m| t.contains(m))
+    });
+    if hit {
+        GATE_PASSED_CALIBRATION
+    } else {
+        ""
+    }
+}
+
 /// Build the judge's instruction (user content): pick the single best answer.
 pub fn judge_prompt(question: &str, labeled_answers: &str) -> String {
+    let calibration = gate_calibration_for(&[question]);
     format!(
         "You are an impartial judge of a panel of AI models. Below is a user question and each model's answer.\n\n\
 Question:\n{question}\n\n\
 Model answers:\n{labeled_answers}\n\n\
 Score each answer for correctness and clarity, then SELECT THE SINGLE BEST answer (verbatim) as the final answer. Also note where models agreed and disagreed.\n\
 Respond with ONLY a JSON object (no prose, no markdown fences) in exactly this shape:\n\
-{{\"final_answer\": \"<the best answer, verbatim>\", \"agreements\": [\"<point of agreement>\"], \"disagreements\": [\"<point of disagreement>\"]}}"
+{{\"final_answer\": \"<the best answer, verbatim>\", \"agreements\": [\"<point of agreement>\"], \"disagreements\": [\"<point of disagreement>\"]}}{calibration}"
     )
 }
 
@@ -105,5 +140,26 @@ mod tests {
         assert_eq!(final_answer, "totally not json");
         assert!(report.agreements.is_empty());
         assert!(warn.is_some());
+    }
+
+    #[test]
+    fn judge_prompt_calibrates_when_gate_passed() {
+        // Bob's debate-mode judge statements embed "## VERIFY OUTPUT".
+        let p = judge_prompt("spec vs diff\n\n## VERIFY OUTPUT\nok", "a: answer");
+        assert!(p.contains("CALIBRATION"), "gate-pass language must trigger calibration");
+        assert!(p.contains("never fail on speculation"));
+    }
+
+    #[test]
+    fn judge_prompt_untouched_without_gate_language() {
+        let p = judge_prompt("which answer is best?", "a: answer");
+        assert!(!p.contains("CALIBRATION"));
+    }
+
+    #[test]
+    fn gate_calibration_detection_is_case_insensitive() {
+        assert!(!gate_calibration_for(&["## Verify Output\n1 passed"]).is_empty());
+        assert!(!gate_calibration_for(&["verify PASSED"]).is_empty());
+        assert!(gate_calibration_for(&["nothing about gates here"]).is_empty());
     }
 }
